@@ -3,7 +3,7 @@
     "version": "1.0.0",
     "name": "RegieLive Subtitles",
     "description": "Subtitrări perfect sincronizate din cea mai mare bază de date din România.",
-    "logo": "https://raw.githubusercontent.com/NumeleTau/stremio-regielive/main/images.png",
+    "logo": "https://stremio-regielive-rjps.onrender.com/logo.png",
     "resources": [
         "subtitles"
     ],

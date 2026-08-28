@@ -7,6 +7,8 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
 const app = express();
+app.use(express.static('public')); // <--- AICI AM ADAUGAT-O!
+
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
 let globalDownloadQueue = Promise.resolve();
