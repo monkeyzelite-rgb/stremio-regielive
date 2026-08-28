@@ -1,0 +1,23 @@
+{
+    "id": "com.stremio.regielive.pro",
+    "version": "1.0.0",
+    "name": "RegieLive Subtitles",
+    "description": "Subtitrări perfect sincronizate din cea mai mare bază de date din România.",
+    "logo": "https://raw.githubusercontent.com/NumeleTau/stremio-regielive/main/images.png",
+    "resources": [
+        "subtitles"
+    ],
+    "types": [
+        "movie",
+        "series"
+    ],
+    "catalogs": [],
+    "idPrefixes": [
+        "tt"
+    ],
+    "behaviorHints": {
+        "configurable": false,
+        "configurationRequired": false
+    }
+}
+
