@@ -7,7 +7,7 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
 const app = express();
-app.use(express.static('public')); // <--- AICI AM ADAUGAT-O!
+app.use(express.static('public'));
 
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
@@ -18,20 +18,25 @@ app.use(getRouter(addonInterface));
 
 app.get('/download', async (req, res) => {
     const zipUrl = req.query.url;
-    const sessionCookie = req.query.cookie || ''; // Citim Cookie-ul din URL
+    const sessionCookie = req.query.cookie || ''; 
     
     if (!zipUrl) return res.status(400).send('URL lipsă');
 
+    // Funcție ajutătoare pentru a trimite corect spre iOS și PC
+    const sendSubtitleResponse = (text, responseObj) => {
+        responseObj.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        responseObj.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+        return responseObj.send(text);
+    };
+
     if (subtitlesCache.has(zipUrl)) {
-        res.setHeader('Content-Type', 'text/srt; charset=utf-8');
-        return res.send(subtitlesCache.get(zipUrl));
+        return sendSubtitleResponse(subtitlesCache.get(zipUrl), res);
     }
 
     if (activeDownloads.has(zipUrl)) {
         try {
             const subtitleText = await activeDownloads.get(zipUrl);
-            res.setHeader('Content-Type', 'text/srt; charset=utf-8');
-            return res.send(subtitleText);
+            return sendSubtitleResponse(subtitleText, res);
         } catch (error) {
             return res.status(500).send('Eroare');
         }
@@ -45,7 +50,7 @@ app.get('/download', async (req, res) => {
             responseType: 'arraybuffer',
             headers: {
                 'RL-API': API_KEY,
-                'Cookie': sessionCookie, // <--- AICI PREZENTĂM SESIUNEA!
+                'Cookie': sessionCookie,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'application/octet-stream, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -57,21 +62,33 @@ app.get('/download', async (req, res) => {
         try {
             zip = new AdmZip(response.data);
         } catch (e) {
-            console.error('[X] Fișierul nu e ZIP! (Probabil e pagină Captcha / IP Blocat).');
+            console.error('[X] Fișierul nu e ZIP!');
             throw new Error('NOT_A_ZIP');
         }
 
         const zipEntries = zip.getEntries();
         let subtitleEntry = null;
         
+        // 1. Căutăm cu prioritate maximă fișierul .srt
         for (const entry of zipEntries) {
             const fileName = entry.entryName.toLowerCase();
             const baseName = fileName.split('/').pop();
             if (fileName.includes('__macosx') || baseName.startsWith('.')) continue;
 
-            if (fileName.endsWith('.srt') || fileName.endsWith('.sub')) {
+            if (fileName.endsWith('.srt')) {
                 subtitleEntry = entry;
                 break;
+            }
+        }
+
+        // 2. Dacă nu e .srt, căutăm alte formate suportate
+        if (!subtitleEntry) {
+            for (const entry of zipEntries) {
+                const fileName = entry.entryName.toLowerCase();
+                if (fileName.endsWith('.sub') || fileName.endsWith('.txt')) {
+                    subtitleEntry = entry;
+                    break;
+                }
             }
         }
 
@@ -110,8 +127,7 @@ app.get('/download', async (req, res) => {
         subtitlesCache.set(zipUrl, subtitleText);
         activeDownloads.delete(zipUrl);
 
-        res.setHeader('Content-Type', 'text/srt; charset=utf-8');
-        res.send(subtitleText);
+        return sendSubtitleResponse(subtitleText, res);
 
     } catch (error) {
         activeDownloads.delete(zipUrl);
