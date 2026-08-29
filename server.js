@@ -7,6 +7,16 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
 const app = express();
+
+// Detectare automata pentru proxy-ul BeamUp (HTTPS)
+app.set('trust proxy', true);
+app.use((req, res, next) => {
+    const protocol = req.headers["x-forwarded-proto"] || (req.secure ? "https" : req.protocol);
+    const host = req.headers["x-forwarded-host"] || req.get("host");
+    req.baseUrl = `${protocol}://${host}`;
+    next();
+});
+
 app.use(express.static('public'));
 
 const subtitlesCache = new Map();
