@@ -5,7 +5,7 @@ const { searchRegieLive } = require("./lib/regielive");
 const builder = new addonBuilder(manifest);
 
 // URL dinamic pentru Render sau Local
-const APP_URL = process.env.APP_URL || "http://127.0.0.1:7000";
+const APP_URL = "https://stremio-regielive.vercel.app";
 
 builder.defineSubtitlesHandler(async function(args) {
     const subs = await searchRegieLive(args.id, args.type);
