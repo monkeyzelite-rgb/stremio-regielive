@@ -29,3 +29,13 @@ A premium Stremio addon that fetches high-quality, perfectly synced Romanian sub
 - 🎯 **Supreme Matching**: Advanced algorithm recognizing over 550 release groups to guarantee perfect synchronization with your video file.
 - ⭐ **Quality Sorting**: Automatically prioritizes subtitles with the highest community ratings.
 - 🎬 **Full Support**: Works flawlessly for both movies and TV series.
+
+## ☕ Susține Proiectul / Support the Project
+
+🇷🇴 Dacă acest addon ți-a fost de ajutor și vrei să mă cinstești cu o cafea pentru efortul depus, o poți face aici:
+👉 **[Revolut: papacu1qhz] https://revolut.me/papacu1qhz
+
+🇬🇧 If this addon helped you and you'd like to buy me a coffee for my effort, you can do it here:
+👉 **[Revolut: papacu1qhz] https://revolut.me/papacu1qhz
+
+Mersi frumos și vizionare plăcută! / Thank you and enjoy watching!
