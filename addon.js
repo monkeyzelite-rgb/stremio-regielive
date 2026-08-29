@@ -4,9 +4,8 @@ const { searchRegieLive } = require("./lib/regielive");
 
 const builder = new addonBuilder(manifest);
 
-// Detectare URL pentru BeamUp sau Local
-const BEAMUP_URL = "https://e64945321a3c-stremio-regielive.baby-beamup.club";
-const APP_URL = process.env.NODE_ENV ? BEAMUP_URL : "http://127.0.0.1:7000";
+// URL dinamic pentru Render sau Local
+const APP_URL = process.env.APP_URL || "http://127.0.0.1:7000";
 
 builder.defineSubtitlesHandler(async function(args) {
     const subs = await searchRegieLive(args.id, args.type);
