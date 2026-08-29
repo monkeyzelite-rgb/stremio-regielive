@@ -2,7 +2,7 @@
     "id": "com.stremio.regielive.pro",
     "version": "1.0.0",
     "name": "RegieLive Subtitles",
-    "description": "Subtitrări perfect sincronizate din cea mai mare bază de date din România.",
+    "description": "Subtitrări în limba română oferite de RegieLive. (unofficial)",
     "logo": "https://stremio-regielive-rjps.onrender.com/logo.png",
     "resources": [
         "subtitles"
