@@ -6,6 +6,7 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
+const { clearSearchCache } = require('./lib/regielive');
 
 const app = express();
 app.use(cors()); // <--- FIX iOS: fara asta, AVPlayer (playerul nativ folosit de Stremio pe iOS) poate respinge tacit request-ul catre /download
@@ -28,6 +29,23 @@ let globalDownloadQueue = Promise.resolve();
 const API_KEY = 'API-BAZARR-YTZ-SL'; 
 
 app.use(getRouter(addonInterface));
+
+// Ruta de debug pentru golirea manuala a cache-urilor, fara redeploy.
+// Seteaza variabila de mediu ADMIN_KEY pe Render (Settings -> Environment) cu o valoare a ta,
+// altfel foloseste o valoare implicita - SCHIMB-O in Render inainte sa lasi ruta activa!
+const ADMIN_KEY = process.env.ADMIN_KEY || 'schimba-cheia-asta';
+
+app.get('/admin/clear-cache', (req, res) => {
+    if (req.query.key !== ADMIN_KEY) {
+        return res.status(403).send('Cheie invalidă.');
+    }
+    const downloadsCleared = subtitlesCache.size;
+    subtitlesCache.clear();
+    activeDownloads.clear();
+    const searchesCleared = clearSearchCache();
+    console.log(`[ADMIN] Cache golit manual: ${downloadsCleared} subtitrări descărcate, ${searchesCleared} căutări.`);
+    res.send(`Cache golit: ${downloadsCleared} subtitrări descărcate + ${searchesCleared} căutări.`);
+});
 
 app.get(['/download', '/download.vtt'], async (req, res) => {
     const zipUrl = req.query.url;
