@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
 const addonInterface = require('./addon');
 const axios = require('axios');
@@ -7,7 +8,19 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
 const app = express();
+app.use(cors()); // <--- FIX iOS: fara asta, AVPlayer (playerul nativ folosit de Stremio pe iOS) poate respinge tacit request-ul catre /download
 app.use(express.static('public')); // <--- AICI AM ADAUGAT-O!
+
+// Converteste SRT in WebVTT. AVPlayer (iOS) nu incarca fisiere .srt "goale" la fel de
+// permisiv cum o fac mpv/exoplayer pe desktop/Android; WebVTT e formatul sigur cross-platform.
+function srtToVtt(srtText) {
+    let text = String(srtText).replace(/\r+/g, '').trim();
+    // elimina liniile index (linie formata doar din cifre) de la inceputul fiecarui bloc
+    text = text.replace(/^\d+\s*$/gm, '');
+    // 00:00:20,000 --> 00:00:24,400  devine  00:00:20.000 --> 00:00:24.400
+    text = text.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    return 'WEBVTT\n\n' + text.trim() + '\n';
+}
 
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
@@ -22,14 +35,15 @@ app.get('/download', async (req, res) => {
     
     if (!zipUrl) return res.status(400).send('URL lipsă');
 
-    // Funcție ajutătoare pentru a trimite corect spre iOS, PC și TV
+    // Funcție ajutătoare pentru a trimite corect spre iOS și PC
     const sendSubtitleResponse = (text, responseObj) => {
-        responseObj.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        responseObj.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
-        return responseObj.send(text);
+        const vttText = srtToVtt(text);
+        responseObj.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        responseObj.setHeader('Content-Disposition', 'inline; filename="subtitle.vtt"');
+        responseObj.setHeader('Access-Control-Allow-Origin', '*');
+        return responseObj.send(vttText);
     };
 
-    // Verificăm cache-ul folosind funcția sigură pentru iPhone
     if (subtitlesCache.has(zipUrl)) {
         return sendSubtitleResponse(subtitlesCache.get(zipUrl), res);
     }
@@ -70,7 +84,7 @@ app.get('/download', async (req, res) => {
         const zipEntries = zip.getEntries();
         let subtitleEntry = null;
         
-        // 1. Căutăm cu prioritate maximă fișierul .srt sau .sub
+        // 1. Căutăm cu prioritate maximă fișierul .srt
         for (const entry of zipEntries) {
             const fileName = entry.entryName.toLowerCase();
             const baseName = fileName.split('/').pop();
@@ -82,7 +96,7 @@ app.get('/download', async (req, res) => {
             }
         }
 
-        // 2. Dacă nu e .srt, căutăm alte formate suportate (.txt)
+        // 2. Dacă nu e .srt, căutăm alte formate suportate
         if (!subtitleEntry) {
             for (const entry of zipEntries) {
                 const fileName = entry.entryName.toLowerCase();
@@ -112,7 +126,7 @@ app.get('/download', async (req, res) => {
     const queuedTask = new Promise((resolve, reject) => {
         globalDownloadQueue = globalDownloadQueue.then(async () => {
             try {
-                // Pauză de 1.5 secunde între cereri pentru a respecta Rate Limit-ul
+                // Am setat așteptarea la 1 secundă, conform cerințelor de Rate Limit
                 await new Promise(r => setTimeout(r, 1500)); 
                 const result = await downloadTask();
                 resolve(result);
