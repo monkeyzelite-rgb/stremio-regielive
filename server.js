@@ -29,7 +29,7 @@ const API_KEY = 'API-BAZARR-YTZ-SL';
 
 app.use(getRouter(addonInterface));
 
-app.get('/download', async (req, res) => {
+app.get(['/download', '/download.vtt'], async (req, res) => {
     const zipUrl = req.query.url;
     const sessionCookie = req.query.cookie || ''; // Citim Cookie-ul din URL
     
@@ -77,7 +77,14 @@ app.get('/download', async (req, res) => {
         try {
             zip = new AdmZip(response.data);
         } catch (e) {
-            console.error('[X] Fișierul nu e ZIP! (Probabil e pagină Captcha / IP Blocat).');
+            // Diagnostic: aflăm EXACT ce am primit înapoi, ca să nu mai ghicim
+            const contentType = response.headers['content-type'] || 'necunoscut';
+            const bodyPreview = Buffer.from(response.data).toString('utf8').slice(0, 300);
+            console.error('[X] Fișierul nu e ZIP!');
+            console.error(`    Status HTTP: ${response.status}`);
+            console.error(`    Content-Type primit: ${contentType}`);
+            console.error(`    Dimensiune răspuns: ${response.data.length} bytes`);
+            console.error(`    Primele 300 caractere din răspuns:\n${bodyPreview}`);
             throw new Error('NOT_A_ZIP');
         }
 
