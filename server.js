@@ -22,13 +22,14 @@ app.get('/download', async (req, res) => {
     
     if (!zipUrl) return res.status(400).send('URL lipsă');
 
-    // Funcție ajutătoare pentru a trimite corect spre iOS și PC
+    // Funcție ajutătoare pentru a trimite corect spre iOS, PC și TV
     const sendSubtitleResponse = (text, responseObj) => {
         responseObj.setHeader('Content-Type', 'text/plain; charset=utf-8');
         responseObj.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
         return responseObj.send(text);
     };
 
+    // Verificăm cache-ul folosind funcția sigură pentru iPhone
     if (subtitlesCache.has(zipUrl)) {
         return sendSubtitleResponse(subtitlesCache.get(zipUrl), res);
     }
@@ -69,7 +70,7 @@ app.get('/download', async (req, res) => {
         const zipEntries = zip.getEntries();
         let subtitleEntry = null;
         
-        // 1. Căutăm cu prioritate maximă fișierul .srt
+        // 1. Căutăm cu prioritate maximă fișierul .srt sau .sub
         for (const entry of zipEntries) {
             const fileName = entry.entryName.toLowerCase();
             const baseName = fileName.split('/').pop();
@@ -81,7 +82,7 @@ app.get('/download', async (req, res) => {
             }
         }
 
-        // 2. Dacă nu e .srt, căutăm alte formate suportate
+        // 2. Dacă nu e .srt, căutăm alte formate suportate (.txt)
         if (!subtitleEntry) {
             for (const entry of zipEntries) {
                 const fileName = entry.entryName.toLowerCase();
@@ -111,7 +112,7 @@ app.get('/download', async (req, res) => {
     const queuedTask = new Promise((resolve, reject) => {
         globalDownloadQueue = globalDownloadQueue.then(async () => {
             try {
-                // Am setat așteptarea la 1 secundă, conform cerințelor de Rate Limit
+                // Pauză de 1.5 secunde între cereri pentru a respecta Rate Limit-ul
                 await new Promise(r => setTimeout(r, 1500)); 
                 const result = await downloadTask();
                 resolve(result);
