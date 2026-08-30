@@ -2,6 +2,9 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const manifest = require("./manifest");
 const { searchRegieLive } = require("./lib/regielive");
 
+// AICI ESTE LINIA ADĂUGATĂ:
+const APP_URL = 'https://stremio-regielive-rjps.onrender.com';
+
 const builder = new addonBuilder(manifest);
 
 
