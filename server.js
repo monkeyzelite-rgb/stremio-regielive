@@ -79,12 +79,22 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
         } catch (e) {
             // Diagnostic: aflăm EXACT ce am primit înapoi, ca să nu mai ghicim
             const contentType = response.headers['content-type'] || 'necunoscut';
-            const bodyPreview = Buffer.from(response.data).toString('utf8').slice(0, 300);
+            const fullBody = Buffer.from(response.data).toString('utf8');
+            const titleMatch = fullBody.match(/<title>([\s\S]*?)<\/title>/i);
+            const pageTitle = titleMatch ? titleMatch[1].trim() : '(fără <title>)';
+
+            const suspectKeywords = ['captcha', 'recaptcha', 'blocat', 'acces interzis', 'access denied',
+                'prea multe', 'limita', 'limită', 'login', 'autentificare', 'sign in', 'cloudflare',
+                'just a moment', 'checking your browser', 'eroare', 'not found', '404'];
+            const foundKeywords = suspectKeywords.filter(k => fullBody.toLowerCase().includes(k));
+
             console.error('[X] Fișierul nu e ZIP!');
             console.error(`    Status HTTP: ${response.status}`);
             console.error(`    Content-Type primit: ${contentType}`);
             console.error(`    Dimensiune răspuns: ${response.data.length} bytes`);
-            console.error(`    Primele 300 caractere din răspuns:\n${bodyPreview}`);
+            console.error(`    <title> pagină: ${pageTitle}`);
+            console.error(`    Cuvinte-cheie suspecte găsite: ${foundKeywords.length ? foundKeywords.join(', ') : '(niciunul)'}`);
+            console.error(`    Primele 1000 caractere din răspuns:\n${fullBody.slice(0, 1000)}`);
             throw new Error('NOT_A_ZIP');
         }
 
