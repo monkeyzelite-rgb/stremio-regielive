@@ -7,7 +7,7 @@ const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
 const app = express();
-app.use(express.static('public'));
+app.use(express.static('public')); // <--- AICI AM ADAUGAT-O!
 
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
@@ -18,7 +18,7 @@ app.use(getRouter(addonInterface));
 
 app.get('/download', async (req, res) => {
     const zipUrl = req.query.url;
-    const sessionCookie = req.query.cookie || ''; 
+    const sessionCookie = req.query.cookie || ''; // Citim Cookie-ul din URL
     
     if (!zipUrl) return res.status(400).send('URL lipsă');
 
@@ -50,8 +50,8 @@ app.get('/download', async (req, res) => {
             responseType: 'arraybuffer',
             headers: {
                 'RL-API': API_KEY,
-                'Cookie': sessionCookie,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Cookie': sessionCookie, // <--- AICI PREZENTĂM SESIUNEA!
+                'User-Agent': 'StremioRegieLiveAddon/1.0.0', // User agent cerut de admin
                 'Accept': 'application/octet-stream, */*',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Referer': 'https://subtitrari.regielive.ro'
@@ -62,7 +62,7 @@ app.get('/download', async (req, res) => {
         try {
             zip = new AdmZip(response.data);
         } catch (e) {
-            console.error('[X] Fișierul nu e ZIP!');
+            console.error('[X] Fișierul nu e ZIP! (Probabil e pagină Captcha / IP Blocat).');
             throw new Error('NOT_A_ZIP');
         }
 
@@ -75,7 +75,7 @@ app.get('/download', async (req, res) => {
             const baseName = fileName.split('/').pop();
             if (fileName.includes('__macosx') || baseName.startsWith('.')) continue;
 
-            if (fileName.endsWith('.srt')) {
+            if (fileName.endsWith('.srt') || fileName.endsWith('.sub')) {
                 subtitleEntry = entry;
                 break;
             }
@@ -85,7 +85,7 @@ app.get('/download', async (req, res) => {
         if (!subtitleEntry) {
             for (const entry of zipEntries) {
                 const fileName = entry.entryName.toLowerCase();
-                if (fileName.endsWith('.sub') || fileName.endsWith('.txt')) {
+                if (fileName.endsWith('.txt')) {
                     subtitleEntry = entry;
                     break;
                 }
@@ -111,6 +111,7 @@ app.get('/download', async (req, res) => {
     const queuedTask = new Promise((resolve, reject) => {
         globalDownloadQueue = globalDownloadQueue.then(async () => {
             try {
+                // Am setat așteptarea la 1 secundă, conform cerințelor de Rate Limit
                 await new Promise(r => setTimeout(r, 1500)); 
                 const result = await downloadTask();
                 resolve(result);
