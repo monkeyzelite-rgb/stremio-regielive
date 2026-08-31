@@ -1,82 +1,267 @@
-const { addonBuilder } = require("stremio-addon-sdk");
-const manifest = require("./manifest");
-const { searchRegieLive } = require("./lib/regielive");
+const axios = require('axios');
+const fuzzball = require('fuzzball');
 
-// AICI ESTE LINIA ADĂUGATĂ:
-const APP_URL = 'https://stremio-regielive-rjps.onrender.com';
+const API_URL = 'https://api.regielive.ro/bazarr/search.php';
+const API_KEY = 'API-BAZARR-YTZ-SL';
+const TITLE_MATCH_THRESHOLD = 60; // sub acest scor (0-100), filmul e considerat "alt film" si e ignorat
+const MIN_RESULTS_THRESHOLD = 5; // sub cate rezultate incercam si urmatoarea metoda de cautare
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minute
 
-const builder = new addonBuilder(manifest);
+const activeSearches = new Map(); // cereri identice in curs (evita cereri duplicate simultane)
+const searchResultCache = new Map(); // rezultate recente (evita sa lovim RegieLive la fiecare refresh de player)
 
+// --- Limitator de conexiuni catre API-ul de cautare RegieLive ---
+// Conform indicatiilor primite de la RegieLive: max ~8 cereri/minut (rafala max 2/sec),
+// si maxim 1-2 conexiuni SIMULTANE catre API. Asta e diferit de limita de descarcare
+// (care e pe volum/reputatie, nu pe viteza) - deci NU atinge cache-ul de download.
+const MAX_CONCURRENT_API_CALLS = 2;
+const MAX_CALLS_PER_MINUTE = 8;
+const MAX_BURST_PER_SECOND = 2;
 
-builder.defineSubtitlesHandler(async function(args) {
-    const subs = await searchRegieLive(args.id, args.type);
-    
-    if (!subs || subs.length === 0) return { subtitles: [] };
+let activeApiConnections = 0;
+const apiCallTimestamps = [];
 
-    const videoFilename = (args.extra && args.extra.filename) ? args.extra.filename.toLowerCase() : "";
+function canMakeApiCallNow() {
+    const now = Date.now();
+    while (apiCallTimestamps.length && now - apiCallTimestamps[0] > 60000) {
+        apiCallTimestamps.shift();
+    }
+    const callsInLastSecond = apiCallTimestamps.filter(t => now - t < 1000).length;
+    return activeApiConnections < MAX_CONCURRENT_API_CALLS
+        && apiCallTimestamps.length < MAX_CALLS_PER_MINUTE
+        && callsInLastSecond < MAX_BURST_PER_SECOND;
+}
 
-    function calculateScore(subTitle, rating) {
-        let score = 0;
-        const subTitleLower = (subTitle || "").toLowerCase();
-
-        if (videoFilename) {
-            // 1. MATCH SUPREM (+100 puncte)
-            const groups = ['0mnidvd', '0tv', '1920', '20ripz', '2hd', '2pacaveli', '3ctweb', '3l', '433', '4fr', '4hm', '4kbec', '4khd', '7sins', 'a4o', 'aaf', 'aas', 'abbie', 'abd', 'abez', 'acclaim', 'aced', 'adhd', 'admirals', 'adrenaline', 'adweb', 'ae', 'aegis', 'aek', 'aen', 'aeroholics', 'afo', 'aggr0', 'airforce', 'airline', 'airwaves', 'aisha', 'ajp69', 'aldi', 'alliance', 'amber', 'ambitious', 'amiable', 'amrap', 'amstel', 'anarchy', 'anbc', 'angelic', 'anihls', 'anivcd', 'ao', 'aoc', 'apex', 'apl', 'aqua', 'archivist', 'argon', 'ariestv', 'arigold', 'arisco', 'ariscrapaysites', 'arrow', 'artemix', 'arthouse', 'asap', 'asister', 'atelier', 'aterfallet', 'atotik', 'ats', 'av1svasi', 'avcdvd', 'avchd', 'avs', 'avs720', 'aw', 'awake', 'azninvasion', 'azurray', 'b3yg1r', 'bae', 'bajskorv', 'baked', 'bamhd', 'bass', 'bbq', 'bdisc', 'beesknees', 'ben.the.men', 'bfm', 'bhdstudio', 'bia', 'bigdoc', 'bioma', 'bitor', 'bizkit', 'blaze', 'bloom', 'bluetv', 'bluranium', 'blutonium', 'bmdru', 'bmf', 'bob', 'bravery', 'brg', 'bs', 'btbn', 'btm', 'btn', 'btsd', 'btw', 'burcyg', 'byndr', 'c0ke', 'caffeine', 'cakes', 'cansiz', 'casstudio', 'cbfm', 'cdd', 'cddhd', 'cebex', 'cg1989', 'chakra', 'chara', 'chd', 'chdsubs', 'chdweb', 'chortle', 'chotab', 'chronicles', 'cia', 'cinefeel', 'cinefile', 'cinefox', 'cinemaniacs', 'cinematic', 'cinemix', 'cinephiles', 'cit', 'classic', 'cmrg', 'coalition', 'coaster', 'codswallop', 'cojonudo', 'compulsion', 'coo7', 'cookiemonster', 'counterfeit', 'cpt', 'cpy', 'cravers', 'crfw', 'crimson', 'crisc', 'critter2376', 'crow', 'crud', 'ct', 'ctrlhd', 'ctrlsd', 'ctu', 'd-z0n3', 'd3g', 'dariush', 'darksaber', 'dawn', 'db', 'deadbadugly', 'decibel', 'deep', 'deflate', 'deimos', 'dermagic', 'deuterium', 'dh', 'digger', 'dimension', 'dirt', 'dkv', 'don', 'dracula', 'drm1', 'dunghill', 'dust', 'ea', 'ebp', 'eclipse', 'edge2020', 'edhd', 'edith', 'edph', 'egen', 'elite', 'encounters', 'end', 'endeavour', 'epsilon', 'erix', 'ethel', 'ethics', 'evolve', 'exploit', 'eztv', 'factory', 'family', 'fc', 'felix', 'fenix', 'fever', 'fgt', 'flame', 'flhd', 'flights', 'florix', 'flux', 'forbidden', 'fov', 'fqm', 'framestor', 'fts', 'futv', 'fw', 'galaxytv', 'gang', 'gardai', 'geckos', 'geek', 'ggez', 'ghd', 'ghost', 'ghouls', 'glhf', 'gnome', 'gnomission', 'goki', 'gossip', 'gprs', 'grace', 'haggis', 'hallowed', 'hawes', 'hdchina', 'hddt', 'hdex', 'hdmi', 'hdsky', 'hdtime', 'herkz', 'heteam', 'hhweb', 'hidt', 'hifi', 'hightimes', 'hiqve', 'hisd', 'hodl', 'hone', 'hqmux', 'huzzah', 'ift', 'ijp', 'ika', 'ime', 'immerse', 'inchy', 'infinity', 'inflate', 'inspirit', 'it00nz', 'ivy', 'jamtarts', 'jatt', 'jbee', 'jenkins', 'jetix', 'jmess', 'joebee', 'jr', 'kamikaze', 'khn', 'killers', 'kimchi', 'kimji', 'kingturd', 'kings', 'kitsune', 'kogi', 'kontrast', 'kralimarko', 'kratos', 'kyogo', 'lazy', 'lazers', 'legi0n', 'linkle', 'lion', 'littleblueman', 'loki', 'lol', 'lolhd', 'lootera', 'lord', 'lostfilm', 'lunar', 'madsky', 'magicstar', 'mainframe', 'mama', 'mch', 'meech', 'megusta', 'mercator', 'mesc', 'mhysa', 'midweek', 'miu', 'mjolnir', 'mnkyddl', 'monkee', 'mortyrick', 'mrhulk', 'mrn', 'mteam', 'mv', 'mzabi', 'n1h4l', 'nailedit', 'naisu', 'ncmt', 'neonoir', 'newman', 'ngr', 'nhtfs', 'nikt0', 'nima4k', 'ninjacentral', 'nitsua', 'nogroup', 'nogrp', 'noma', 'nortekst', 'nosivid', 'noxxus', 'npms', 'ntb', 'ntg', 'nyh', 'o69', 'oft', 'onlyfaffs', 'orbitron', 'ouija', 'ourbits', 'oxidizer', 'panda', 'pawel2006', 'paxa', 'pexa', 'pfa', 'phocis', 'phoenix', 'pi', 'pieguy', 'pike', 'pitbull', 'playbd', 'playhd', 'playweb', 'plutonium', 'pmhd', 'pmp', 'pof', 'poiasd', 'poppers', 'poppycock', 'pow4hd', 'pragma', 'primefix', 'prodji', 'psa', 'psig', 'pter', 'ptg', 'ptp', 'qash', 'qfg', 'qman', 'qoq', 'quintessence', 'qxr', 'r&h', 'r0cked', 'ralphy', 'rapta', 'rarbg', 'rawr', 'rcsw', 'rcvr', 'regedits', 'regret', 'revils', 'reward', 'river', 'rng', 'roccat', 'rogue', 'rovers', 'rtfm', 'rtn', 'rumour', 's14', 'sa89', 'sadpanda', 'saints', 'saphire', 'sbr', 'sdcc', 'sector7', 'seedpool', 'seriously', 'sexsh0p', 'sfm', 'shieldbearer', 'shieldearer', 'shortbrehd', 'sic', 'sicfoi', 'sighthd', 'sigma', 'silence', 'siluhd', 'sinners', 'siq', 'sitv', 'skizoid', 'skyfire', 'slignome', 'slm', 'sloth', 'smd', 'smurf', 'sow', 'sparks', 'sphd', 'spid3r', 'spirit', 'squalor', 'stc', 'strife', 'strontium', 'successfulcrab', 'sumvision', 'sunspot', 'surfinbird', 'svd', 'swaglander', 'swtyblz', 'sys', 't00ng0d', 't4h', 't6d', 'tabularia', 'taoe', 'tayto', 'tbn', 'tbs', 'tcm', 'tdd', 'telly', 'tepes', 'terra', 'tgx', 'thefarm', 'thelastofus', 'thewretched', 'thx', 'tikos', 'timelords', 'tizu', 'tjupt', 'tl', 'tlf', 'tn', 'tnp', 'toa', 'tommy', 'tovar', 'triton', 'trollhd', 'tsint', 'ttg', 'tva', 'tvr', 'tvsmash', 'twaseries', 'twisted', 'tx', 'ultimatex264', 'umd', 'umf', 'underbelly', 'universum', 'unveil', 'useless', 'utr', 'varyg', 'vcdvault', 'vd0n', 'velvet', 'vialle', 'viethd', 'vietnam', 'vision', 'visum', 'voa', 'w0rm', 'w4f', 'w4nk3r', 'wadu', 'walmart', 'wankaz', 'wdym', 'webdv', 'welp', 'whatelse', 'whiskeyjack', 'whoised', 'wide', 'wiki', 'wildcat', 'wire', 'woke', 'wpi', 'wusiwug', 'xebec', 'xepa', 'xlf', 'xor', 'xtm', 'xxx4u', 'yassmiso', 'yawnix', 'ycdv', 'yello', 'yellowbird', 'yestv', 'yify', 'youforgottorepackthis', 'yts', 'zero00', 'zerotwo', 'zmnt', 'zorosenpai', 'zq', 'zzgtv'];
-
-            for (let g of groups) {
-                const regex = new RegExp(`\\b${g}\\b`, 'i');
-                if (regex.test(videoFilename) && regex.test(subTitleLower)) {
-                    score += 100;
-                    break; 
-                }
+function acquireApiSlot() {
+    return new Promise(resolve => {
+        const tryAcquire = () => {
+            if (canMakeApiCallNow()) {
+                activeApiConnections++;
+                apiCallTimestamps.push(Date.now());
+                resolve();
+            } else {
+                setTimeout(tryAcquire, 150);
             }
+        };
+        tryAcquire();
+    });
+}
 
-            // 2. MATCH PRINCIPAL: Sursa (+50 puncte)
-            const sources = ['remux', 'bluray', 'bdrip', 'brrip', 'web-dl', 'webrip', 'web', 'hdtv', 'dvdrip', 'dvdscr', 'hdcam', 'cam'];
-            for (let s of sources) {
-                if (videoFilename.includes(s) && subTitleLower.includes(s)) score += 50;
+function releaseApiSlot() {
+    activeApiConnections = Math.max(0, activeApiConnections - 1);
+}
+
+async function getCinemetaInfo(imdbId, type) {
+    try {
+        const baseId = imdbId.split(':')[0];
+        const res = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${baseId}.json`);
+        return res.data.meta;
+    } catch (error) {
+        console.error("Eroare Cinemeta:", error.message);
+        return null;
+    }
+}
+
+async function fetchFromRegieLive(params) {
+    await acquireApiSlot();
+    try {
+        return await axios.get(API_URL, {
+            params: params,
+            headers: {
+                'RL-API': API_KEY,
+                'User-Agent': 'StremioRegieLiveAddon/1.0.0',
+                'Referer': 'https://subtitrari.regielive.ro',
+                'Accept': 'application/json, text/plain, */*'
             }
-            
-            // 3. MATCH SECUNDAR: Rezoluția (+20 puncte)
-            const resolutions = ['2160p', '1080p', '720p', '480p'];
-            for (let res of resolutions) {
-                if (videoFilename.includes(res) && subTitleLower.includes(res)) score += 20;
-            }
-        }
+        });
+    } finally {
+        releaseApiSlot();
+    }
+}
 
-        // 4. NOTA RegieLive ca departajare finală
-        const ratingNum = parseFloat(rating);
-        if (!isNaN(ratingNum)) {
-            score += ratingNum; 
-        }
+async function searchRegieLive(imdbId, type) {
+    const cacheKey = `${type}:${imdbId}`;
 
-        return score;
+    // Daca exista deja o cautare identica in desfasurare (Stremio cere subtitrari
+    // de multiple ori aproape simultan pentru acelasi episod), ne agatam de ea in loc
+    // sa trimitem alta cerere in paralel catre RegieLive (asta declansa rate-limit-ul
+    // lor tacut si dadea rezultate "hit or miss").
+    if (activeSearches.has(cacheKey)) {
+        console.log(`[CACHE] Căutare identică deja în curs pentru ${cacheKey}, reutilizez rezultatul.`);
+        return activeSearches.get(cacheKey);
     }
 
-    let subtitles = subs.map(sub => {
-        const downloadUrl = sub.url.startsWith('http') ? sub.url : `https://subtitrari.regielive.ro${sub.url}`;
-        
-        return {
-            id: sub.id,
-            url: `${APP_URL}/download?url=${encodeURIComponent(downloadUrl)}&cookie=${encodeURIComponent(sub.cookie || '')}`,
-            lang: "ron", 
-            title: sub.title || "RegieLive",
-            score: calculateScore(sub.title, sub.rating)
-        };
-    });
+    const now = Date.now();
+    const cached = searchResultCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+        console.log(`[CACHE] Rezultat recent în cache pentru ${cacheKey}.`);
+        return cached.data;
+    }
 
-    // Ordonăm lista descrescător.
-    subtitles.sort((a, b) => b.score - a.score);
+    const searchPromise = _searchRegieLive(imdbId, type);
+    activeSearches.set(cacheKey, searchPromise);
 
-    // Curățăm câmpul 'score'
-    subtitles = subtitles.map(sub => ({
-        id: sub.id,
-        url: sub.url,
-        lang: sub.lang,
-        title: sub.title
-    }));
+    try {
+        const result = await searchPromise;
+        searchResultCache.set(cacheKey, { data: result, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+        return result;
+    } finally {
+        activeSearches.delete(cacheKey);
+    }
+}
 
-    return { subtitles: subtitles };
-});
+async function _searchRegieLive(imdbId, type) {
+    console.log(`\n--- [CĂUTARE NOUĂ] ---`);
+    console.log(`[1] Caut pentru ${type} cu ID: ${imdbId}`);
 
-module.exports = builder.getInterface();
+    const cleanImdbId = imdbId.split(':')[0];
+
+    const seenSubIds = new Set(); // dedup pe baza ID-ului subtitrarii (subKey)
+    const subtitles = [];
+    let sessionCookie = "";
+    let meta = null; // info Cinemeta, obtinute lazy, o singura data
+
+    // Extrage rezultatele dintr-un raspuns RegieLive si le adauga in lista finala,
+    // sarind peste duplicate si (optional) peste filme care nu se potrivesc cu titlul cautat.
+    function ingestResponse(response, { isFallbackByName, referenceTitle }) {
+        if (!response) return 0;
+
+        if (response.headers && response.headers['set-cookie']) {
+            sessionCookie = response.headers['set-cookie'].map(c => c.split(';')[0]).join('; ');
+        }
+
+        if (!response.data || !response.data.rezultate) return 0;
+
+        const filme = response.data.rezultate;
+        let added = 0;
+        let firstFilmLogged = false;
+
+        for (const filmKey in filme) {
+            const filmObj = filme[filmKey];
+            const subs = filmObj.subtitrari;
+            if (!subs) continue;
+
+            // Validam identitatea filmului doar cand am cautat dupa nume (fallback),
+            // pentru ca acolo RegieLive poate returna filme diferite cu nume asemanator.
+            if (isFallbackByName && referenceTitle) {
+                let filmTitle = null;
+                if (typeof filmObj.film === 'string') {
+                    filmTitle = filmObj.film;
+                } else if (filmObj.film && typeof filmObj.film === 'object') {
+                    filmTitle = filmObj.film.nume || filmObj.film.titlu || filmObj.film.name || filmObj.film.title || null;
+                } else {
+                    filmTitle = filmObj.nume || filmObj.titlu || filmObj.name || filmObj.title || null;
+                }
+
+                if (!firstFilmLogged) {
+                    console.log('[DEBUG] Chei disponibile pe obiectul film RegieLive:', Object.keys(filmObj));
+                    console.log('[DEBUG] Conținutul câmpului "film":', JSON.stringify(filmObj.film));
+                    firstFilmLogged = true;
+                }
+
+                if (filmTitle) {
+                    const matchScore = fuzzball.ratio(referenceTitle, filmTitle);
+                    if (matchScore < TITLE_MATCH_THRESHOLD) {
+                        console.log(`[FILTRU TITLU] Ignor "${filmTitle}" (scor ${matchScore} fata de "${referenceTitle}")`);
+                        continue;
+                    }
+                }
+                // daca filmTitle e null, nu putem valida -> lasam rezultatul sa treaca
+            }
+
+            for (const subKey in subs) {
+                if (seenSubIds.has(subKey)) continue; // deja adaugat dintr-o cautare anterioara
+                seenSubIds.add(subKey);
+
+                subtitles.push({
+                    id: subKey,
+                    lang: 'ron',
+                    title: subs[subKey].titlu,
+                    url: subs[subKey].url,
+                    rating: subs[subKey].rating ? subs[subKey].rating.nota : "N/A",
+                    cookie: sessionCookie
+                });
+                added++;
+            }
+        }
+        return added;
+    }
+
+    // --- METODA 1: strict dupa ID-ul de IMDb (cea mai precisa) ---
+    try {
+        const imdbParams = { imdbid: cleanImdbId };
+        if (type === 'series') {
+            const parts = imdbId.split(':');
+            imdbParams.sezon = parts[1];
+            imdbParams.episod = parts[2];
+        }
+
+        console.log(`[DEBUG API] Încercarea 1 (Strict IMDb ID):`, imdbParams);
+        const response = await fetchFromRegieLive(imdbParams);
+        ingestResponse(response, { isFallbackByName: false });
+    } catch (err) {
+        console.log(`[!] Căutarea după IMDb ID nu a returnat rezultate (404 sau eroare). Trecem la planul 2...`);
+    }
+
+    // --- METODA 2: Nume + An, doar daca inca nu avem destule rezultate ---
+    if (subtitles.length < MIN_RESULTS_THRESHOLD) {
+        meta = await getCinemetaInfo(imdbId, type);
+        if (meta) {
+            const textParams = {};
+            if (type === 'series') {
+                const parts = imdbId.split(':');
+                textParams.nume = meta.name;
+                textParams.sezon = parts[1];
+                textParams.episod = parts[2];
+            } else {
+                textParams.nume = meta.name;
+            }
+
+            const rawYear = meta.year || meta.releaseInfo;
+            if (rawYear) {
+                textParams.an = parseInt(String(rawYear).substring(0, 4), 10);
+            }
+
+            console.log(`[DEBUG API] Încercarea 2 (Nume + An de rezervă):`, textParams);
+            try {
+                const response = await fetchFromRegieLive(textParams);
+                ingestResponse(response, { isFallbackByName: true, referenceTitle: meta.name });
+            } catch (err2) {
+                console.log(`[!] Căutarea Nume+An a eșuat (404 sau eroare). Trecem la planul 3...`);
+            }
+        }
+    }
+
+    // --- METODA 3: doar Nume, tot ca sa completam pana la pragul minim ---
+    if (subtitles.length < MIN_RESULTS_THRESHOLD) {
+        if (!meta) meta = await getCinemetaInfo(imdbId, type);
+        if (meta) {
+            const nameOnlyParams = { nume: meta.name };
+            if (type === 'series') {
+                const parts = imdbId.split(':');
+                nameOnlyParams.sezon = parts[1];
+                nameOnlyParams.episod = parts[2];
+            }
+
+            console.log(`[DEBUG API] Încercarea 3 (Doar Nume curat):`, nameOnlyParams);
+            try {
+                const response = await fetchFromRegieLive(nameOnlyParams);
+                ingestResponse(response, { isFallbackByName: true, referenceTitle: meta.name });
+            } catch (err3) {
+                console.log(`[OK] Nicio subtitrare suplimentară găsită pe RegieLive pentru acest titlu.`);
+            }
+        }
+    }
+
+    console.log(`[OK] Trimis la Stremio: ${subtitles.length} subtitrări (Sesiune salvată).`);
+    return subtitles;
+}
+
+function clearSearchCache() {
+    const count = searchResultCache.size;
+    searchResultCache.clear();
+    activeSearches.clear();
+    return count;
+}
+
+module.exports = { searchRegieLive, clearSearchCache };
