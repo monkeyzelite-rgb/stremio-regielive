@@ -118,16 +118,31 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
 
         const zipEntries = zip.getEntries();
         let subtitleEntry = null;
-        
-        // 1. Căutăm cu prioritate maximă fișierul .srt
+
+        // 1. Căutăm fișierele .srt/.sub. Dacă sunt mai multe (ex: film + bonus/documentar/extra),
+        // alegem pe cel mai mare ca dimensiune - subtitrarea filmului întreg are mult mai
+        // multe rânduri decât un extra/bonus/sample, deci e cel mai fiabil semnal.
+        const candidates = [];
         for (const entry of zipEntries) {
             const fileName = entry.entryName.toLowerCase();
             const baseName = fileName.split('/').pop();
             if (fileName.includes('__macosx') || baseName.startsWith('.')) continue;
 
             if (fileName.endsWith('.srt') || fileName.endsWith('.sub')) {
-                subtitleEntry = entry;
-                break;
+                candidates.push(entry);
+            }
+        }
+
+        if (candidates.length > 0) {
+            candidates.sort((a, b) => (b.header.size || 0) - (a.header.size || 0));
+            subtitleEntry = candidates[0];
+
+            if (candidates.length > 1) {
+                console.log(`[ARHIVĂ] ${candidates.length} fișiere de subtitrare găsite în ZIP, aleg cel mai mare:`);
+                candidates.forEach((c, i) => {
+                    const marker = i === 0 ? '  <-- ALES' : '';
+                    console.log(`    "${c.entryName}" — ${c.header.size} bytes${marker}`);
+                });
             }
         }
 
