@@ -17,6 +17,9 @@ builder.defineSubtitlesHandler(async function(args) {
 
     function calculateScore(subTitle, rating) {
         let score = 0;
+        let matchedGroup = null;
+        let sourceMatch = null;
+        let resMatch = null;
         const subTitleLower = (subTitle || "").toLowerCase();
 
         if (videoFilename) {
@@ -27,6 +30,7 @@ builder.defineSubtitlesHandler(async function(args) {
                 const regex = new RegExp(`\\b${g}\\b`, 'i');
                 if (regex.test(videoFilename) && regex.test(subTitleLower)) {
                     score += 100;
+                    matchedGroup = g;
                     break; 
                 }
             }
@@ -34,13 +38,19 @@ builder.defineSubtitlesHandler(async function(args) {
             // 2. MATCH PRINCIPAL: Sursa (+50 puncte)
             const sources = ['remux', 'bluray', 'bdrip', 'brrip', 'web-dl', 'webrip', 'web', 'hdtv', 'dvdrip', 'dvdscr', 'hdcam', 'cam'];
             for (let s of sources) {
-                if (videoFilename.includes(s) && subTitleLower.includes(s)) score += 50;
+                if (videoFilename.includes(s) && subTitleLower.includes(s)) {
+                    score += 50;
+                    sourceMatch = s;
+                }
             }
             
             // 3. MATCH SECUNDAR: Rezoluția (+20 puncte)
             const resolutions = ['2160p', '1080p', '720p', '480p'];
             for (let res of resolutions) {
-                if (videoFilename.includes(res) && subTitleLower.includes(res)) score += 20;
+                if (videoFilename.includes(res) && subTitleLower.includes(res)) {
+                    score += 20;
+                    resMatch = res;
+                }
             }
         }
 
@@ -50,25 +60,40 @@ builder.defineSubtitlesHandler(async function(args) {
             score += ratingNum; 
         }
 
-        return score;
+        return { score, breakdown: { matchedGroup, sourceMatch, resMatch, rating: isNaN(ratingNum) ? null : ratingNum } };
     }
 
     let subtitles = subs.map(sub => {
         const downloadUrl = sub.url.startsWith('http') ? sub.url : `https://subtitrari.regielive.ro${sub.url}`;
-        
+        const { score, breakdown } = calculateScore(sub.title, sub.rating);
+
         return {
             id: sub.id,
             url: `${APP_URL}/download?url=${encodeURIComponent(downloadUrl)}&cookie=${encodeURIComponent(sub.cookie || '')}`,
             lang: "ron", 
             title: sub.title || "RegieLive",
-            score: calculateScore(sub.title, sub.rating)
+            score,
+            breakdown
         };
     });
 
-    // Ordonăm lista descrescător.
+    // Ordonăm lista descrescător. (logica de sortare NESCHIMBATĂ)
     subtitles.sort((a, b) => b.score - a.score);
 
-    // Curățăm câmpul 'score'
+    // --- LOGGING DE DIAGNOSTIC (nu influențează alegerea/ordinea, doar o afișează) ---
+    console.log(`\n[SCOR] Clasament subtitrări pentru "${videoFilename || '(fără nume fișier)'}":`);
+    subtitles.forEach((sub, i) => {
+        const b = sub.breakdown;
+        const parts = [];
+        if (b.matchedGroup) parts.push(`grup:${b.matchedGroup}(+100)`);
+        if (b.sourceMatch) parts.push(`sursă:${b.sourceMatch}(+50)`);
+        if (b.resMatch) parts.push(`rez:${b.resMatch}(+20)`);
+        if (b.rating !== null) parts.push(`rating RegieLive:${b.rating}`);
+        const marker = i === 0 ? '  <-- ALEASĂ AUTOMAT' : '';
+        console.log(`  #${i + 1} [scor ${sub.score}] "${sub.title}" — ${parts.join(', ') || 'fără potriviri'}${marker}`);
+    });
+
+    // Curățăm câmpurile suplimentare (score, breakdown) - Stremio primește doar ce trebuie
     subtitles = subtitles.map(sub => ({
         id: sub.id,
         url: sub.url,
