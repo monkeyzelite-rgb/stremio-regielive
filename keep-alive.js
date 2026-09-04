@@ -1,7 +1,7 @@
 const https = require('https');
 
 // URL-ul tău real de pe Render
-const RENDER_URL = 'https://stremio-regielive-rjps.onrender.com'; 
+const RENDER_URL = 'https://stremio-regielive-rjps.onrender.com/manifest.json';
 
 console.log('[Anti-Sleep] Serviciul de mentinere activa a pornit.');
 
