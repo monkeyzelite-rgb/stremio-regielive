@@ -36,7 +36,14 @@ builder.defineSubtitlesHandler(async function(args) {
             }
 
             // 2. MATCH PRINCIPAL: Sursa (+50 puncte)
-            const sources = ['remux', 'bluray', 'bdrip', 'brrip', 'web-dl', 'webrip', 'web', 'hdtv', 'dvdrip', 'dvdscr', 'hdcam', 'cam'];
+            const sources = [
+                'remux', 'bluray', 'blu-ray', 'bdrip', 'brrip', 'bd', 'uhd',
+                'web-dl', 'webdl', 'webrip', 'web',
+                'hdtv', 'pdtv', 'dsr',
+                'dvdrip', 'dvdscr', 'screener', 'scr',
+                'hdcam', 'cam', 'ts', 'telesync', 'tc', 'telecine',
+                'r5', 'hdrip', 'tvrip', 'hddvd'
+            ];
             for (let s of sources) {
                 if (videoFilenameLower.includes(s) && subTitleLower.includes(s)) {
                     score += 50;
