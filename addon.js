@@ -20,6 +20,7 @@ builder.defineSubtitlesHandler(async function(args) {
         let matchedGroup = null;
         let sourceMatch = null;
         let resMatch = null;
+        const breakdown = {};
         const subTitleLower = (subTitle || "").toLowerCase();
 
         if (videoFilenameLower) {
@@ -35,7 +36,9 @@ builder.defineSubtitlesHandler(async function(args) {
                 }
             }
 
-            // 2. MATCH PRINCIPAL: Sursa (+50 puncte)
+            // 2. MATCH PRINCIPAL: Sursa (+50 puncte) — ordinea contează: mai specific primul
+            // Sortăm descrescător după lungime ca să prindem 'web-dl' înaintea lui 'web',
+            // apoi break la primul match (fix pentru dubla adunare web-dl+web = +100).
             const sources = [
                 'remux', 'bluray', 'blu-ray', 'bdrip', 'brrip', 'bd', 'uhd',
                 'web-dl', 'webdl', 'webrip', 'web',
@@ -43,20 +46,78 @@ builder.defineSubtitlesHandler(async function(args) {
                 'dvdrip', 'dvdscr', 'screener', 'scr',
                 'hdcam', 'cam', 'ts', 'telesync', 'tc', 'telecine',
                 'r5', 'hdrip', 'tvrip', 'hddvd'
-            ];
+            ].sort((a, b) => b.length - a.length); // mai specific primul
+
             for (let s of sources) {
                 if (videoFilenameLower.includes(s) && subTitleLower.includes(s)) {
                     score += 50;
                     sourceMatch = s;
+                    break; // fix: oprim la primul match, nu acumulam web-dl + web = +100
                 }
             }
-            
-            // 3. MATCH SECUNDAR: Rezoluția (+20 puncte)
+
+            // 3. MATCH SECUNDAR: Rezoluția (+20 puncte) — break la primul match
             const resolutions = ['2160p', '1080p', '720p', '480p'];
             for (let res of resolutions) {
                 if (videoFilenameLower.includes(res) && subTitleLower.includes(res)) {
                     score += 20;
                     resMatch = res;
+                    break;
+                }
+            }
+
+            // 4. SEZON + EPISOD pentru seriale (+80 match complet, +40 doar sezon)
+            // Cel mai important criteriu de departajare pentru seriale cu subtitrari multiple.
+            const seMatch = videoFilenameLower.match(/s(\d{1,2})e(\d{1,2})/i) ||
+                            videoFilenameLower.match(/(\d{1,2})x(\d{1,2})/i);
+            if (seMatch) {
+                const season = seMatch[1].padStart(2, '0');
+                const episode = seMatch[2].padStart(2, '0');
+                const subHasFull = subTitleLower.includes(`s${season}e${episode}`) ||
+                                   subTitleLower.includes(`${parseInt(season)}x${parseInt(episode)}`);
+                const subHasSeason = subTitleLower.includes(`s${season}`) ||
+                                     subTitleLower.includes(`season ${parseInt(season)}`);
+                if (subHasFull) {
+                    score += 80;
+                    breakdown.seEpisode = `S${season}E${episode}(+80)`;
+                } else if (subHasSeason) {
+                    score += 40;
+                    breakdown.seEpisode = `S${season}(+40)`;
+                }
+            }
+
+            // 5. ANUL filmului (+30) — util pentru remake-uri (ex: Dune 1984 vs 2021)
+            const yearMatch = videoFilenameLower.match(/\b(19|20)\d{2}\b/);
+            if (yearMatch && subTitleLower.includes(yearMatch[0])) {
+                score += 30;
+                breakdown.year = `${yearMatch[0]}(+30)`;
+            }
+
+            // 6. CODEC (+15) — bonus minor cand uploaderii il mentioneaza explicit
+            const codecs = ['x265', 'hevc', 'x264', 'h264', 'av1'];
+            for (const codec of codecs) {
+                if (videoFilenameLower.includes(codec) && subTitleLower.includes(codec)) {
+                    score += 15;
+                    breakdown.codec = `${codec}(+15)`;
+                    break;
+                }
+            }
+
+            // 7. SOFT TOKEN OVERLAP — fallback cand nu exista match puternic
+            // Ex: "Black Sails - S03E01.mkv" fara release group/sursa
+            if (score < 50 && videoFilenameLower) {
+                const videoTokens = videoFilenameLower
+                    .replace(/[^\w\s]/g, ' ')
+                    .split(/\s+/)
+                    .filter(t => t.length > 2);
+                let common = 0;
+                for (const token of videoTokens) {
+                    if (subTitleLower.includes(token)) common++;
+                }
+                if (common >= 3) {
+                    const softBonus = Math.min(common * 5, 25);
+                    score += softBonus;
+                    breakdown.softMatch = `${common} tokene comune(+${softBonus})`;
                 }
             }
         }
@@ -67,7 +128,7 @@ builder.defineSubtitlesHandler(async function(args) {
             score += ratingNum; 
         }
 
-        return { score, breakdown: { matchedGroup, sourceMatch, resMatch, rating: isNaN(ratingNum) ? null : ratingNum } };
+        return { score, breakdown: { matchedGroup, sourceMatch, resMatch, ...breakdown, rating: isNaN(ratingNum) ? null : ratingNum } };
     }
 
     let subtitles = subs.map(sub => {
@@ -93,8 +154,12 @@ builder.defineSubtitlesHandler(async function(args) {
         const b = sub.breakdown;
         const parts = [];
         if (b.matchedGroup) parts.push(`grup:${b.matchedGroup}(+100)`);
+        if (b.seEpisode) parts.push(`SE:${b.seEpisode}`);
         if (b.sourceMatch) parts.push(`sursă:${b.sourceMatch}(+50)`);
+        if (b.year) parts.push(`an:${b.year}`);
         if (b.resMatch) parts.push(`rez:${b.resMatch}(+20)`);
+        if (b.codec) parts.push(`codec:${b.codec}`);
+        if (b.softMatch) parts.push(`soft:${b.softMatch}`);
         if (b.rating !== null) parts.push(`rating RegieLive:${b.rating}`);
         const marker = i === 0 ? '  <-- ALEASĂ AUTOMAT' : '';
         console.log(`  #${i + 1} [scor ${sub.score}] "${sub.title}" — ${parts.join(', ') || 'fără potriviri'}${marker}`);
