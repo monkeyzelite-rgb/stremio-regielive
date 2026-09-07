@@ -170,7 +170,7 @@ builder.defineSubtitlesHandler(async function(args) {
         const parts = [];
         if (b.matchedGroup) parts.push(`grup:${b.matchedGroup}(+100)`);
         if (b.seEpisode) parts.push(`SE:${b.seEpisode}`);
-        if (b.sourceMatch) parts.push(`sursă:${b.sourceMatch}(+50)`);
+        if (b.sourceMatch) parts.push(`sursă:${b.sourceMatch}`);
         if (b.year) parts.push(`an:${b.year}`);
         if (b.resMatch) parts.push(`rez:${b.resMatch}(+20)`);
         if (b.codec) parts.push(`codec:${b.codec}`);
