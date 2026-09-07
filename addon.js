@@ -36,23 +36,38 @@ builder.defineSubtitlesHandler(async function(args) {
                 }
             }
 
-            // 2. MATCH PRINCIPAL: Sursa (+50 puncte) — ordinea contează: mai specific primul
-            // Sortăm descrescător după lungime ca să prindem 'web-dl' înaintea lui 'web',
-            // apoi break la primul match (fix pentru dubla adunare web-dl+web = +100).
-            const sources = [
-                'remux', 'bluray', 'blu-ray', 'bdrip', 'brrip', 'bd', 'uhd',
-                'web-dl', 'webdl', 'webrip', 'web',
-                'hdtv', 'pdtv', 'dsr',
-                'dvdrip', 'dvdscr', 'screener', 'scr',
-                'hdcam', 'cam', 'ts', 'telesync', 'tc', 'telecine',
-                'r5', 'hdrip', 'tvrip', 'hddvd'
-            ].sort((a, b) => b.length - a.length); // mai specific primul
+            // 2. MATCH PRINCIPAL: Sursa (+50 puncte exact, +45 aceeași familie)
+            // REMUX e sursă de pe Blu-ray/UHD, dar subtitrările de pe RegieLive de obicei
+            // zic doar "BluRay", nu "REMUX" - cuvinte diferite, aceeași categorie de sursă.
+            // Grupăm pe familii ca să nu pierdem în fața unui WEB-DL/HDTV doar pentru că
+            // textul exact nu se potrivește 1:1.
+            const sourceFamilies = {
+                disc: ['blu-ray', 'bluray', 'remux', 'bdrip', 'brrip', 'hddvd', 'bd', 'uhd'],
+                web: ['web-dl', 'webdl', 'webrip', 'web'],
+                tv: ['hdtv', 'pdtv', 'dsr', 'tvrip'],
+                dvd: ['dvdrip', 'dvdscr', 'screener', 'scr', 'r5', 'hdrip'],
+                cam: ['telesync', 'telecine', 'hdcam', 'cam', 'ts', 'tc']
+            };
 
-            for (let s of sources) {
-                if (videoFilenameLower.includes(s) && subTitleLower.includes(s)) {
+            function detectSourceFamily(text) {
+                for (const familyName in sourceFamilies) {
+                    for (const kw of sourceFamilies[familyName]) {
+                        if (text.includes(kw)) return { family: familyName, keyword: kw };
+                    }
+                }
+                return null;
+            }
+
+            const videoSource = detectSourceFamily(videoFilenameLower);
+            const subSource = detectSourceFamily(subTitleLower);
+
+            if (videoSource && subSource) {
+                if (videoSource.keyword === subSource.keyword) {
                     score += 50;
-                    sourceMatch = s;
-                    break; // fix: oprim la primul match, nu acumulam web-dl + web = +100
+                    sourceMatch = videoSource.keyword;
+                } else if (videoSource.family === subSource.family) {
+                    score += 45;
+                    sourceMatch = `${subSource.keyword}~${videoSource.keyword}`;
                 }
             }
 
