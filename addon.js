@@ -12,7 +12,16 @@ builder.defineSubtitlesHandler(async function(args) {
     const videoFilename = (args.extra && args.extra.filename) ? args.extra.filename : "";
     const subs = await searchRegieLive(args.id, args.type, videoFilename);
     const videoFilenameLower = videoFilename.toLowerCase();
-    
+
+    // Sezon/episod cunoscute din ID-ul Stremio (nu din numele fisierului) - trimise mai
+    // departe la /download ca sa poata alege corect fisierul potrivit dintr-o arhiva cu mai multe.
+    let knownSeason = null, knownEpisode = null;
+    if (args.type === 'series') {
+        const idParts = args.id.split(':');
+        knownSeason = idParts[1] || null;
+        knownEpisode = idParts[2] || null;
+    }
+
     if (!subs || subs.length === 0) return { subtitles: [] };
 
     function calculateScore(subTitle, rating) {
@@ -90,8 +99,9 @@ builder.defineSubtitlesHandler(async function(args) {
                 const episode = seMatch[2].padStart(2, '0');
                 const subHasFull = subTitleLower.includes(`s${season}e${episode}`) ||
                                    subTitleLower.includes(`${parseInt(season)}x${parseInt(episode)}`);
-                const subHasSeason = subTitleLower.includes(`s${season}`) ||
-                                     subTitleLower.includes(`season ${parseInt(season)}`);
+                const subHasSeason = new RegExp(`s0?${parseInt(season)}(?!\\d)`, 'i').test(subTitleLower) ||
+                                     new RegExp(`season[\\s._-]*0?${parseInt(season)}(?!\\d)`, 'i').test(subTitleLower) ||
+                                     new RegExp(`sezonul[\\s._-]*0?${parseInt(season)}(?!\\d)`, 'i').test(subTitleLower);
                 if (subHasFull) {
                     score += 80;
                     breakdown.seEpisode = `S${season}E${episode}(+80)`;
@@ -146,14 +156,16 @@ builder.defineSubtitlesHandler(async function(args) {
         return { score, breakdown: { matchedGroup, sourceMatch, resMatch, ...breakdown, rating: isNaN(ratingNum) ? null : ratingNum } };
     }
 
+    const episodeParams = (knownSeason && knownEpisode) ? `&season=${encodeURIComponent(knownSeason)}&episode=${encodeURIComponent(knownEpisode)}` : '';
+
     let subtitles = subs.map(sub => {
         const downloadUrl = sub.url.startsWith('http') ? sub.url : `https://subtitrari.regielive.ro${sub.url}`;
         const { score, breakdown } = calculateScore(sub.title, sub.rating);
 
         return {
             id: sub.id,
-            url: `${APP_URL}/download.vtt?url=${encodeURIComponent(downloadUrl)}&cookie=${encodeURIComponent(sub.cookie || '')}`,
-            lang: "ron", 
+            url: `${APP_URL}/download.vtt?url=${encodeURIComponent(downloadUrl)}&cookie=${encodeURIComponent(sub.cookie || '')}${episodeParams}`,
+            lang: "ron",
             title: sub.title || "RegieLive",
             score,
             breakdown
