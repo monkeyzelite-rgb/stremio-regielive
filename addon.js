@@ -7,6 +7,27 @@ const APP_URL = 'https://stremio-regielive-rjps.onrender.com';
 
 const builder = new addonBuilder(manifest);
 
+// Etichete de afisare (doar cosmetic, in title/id/label) - nu influenteaza scorul,
+// care ramane calculat separat in calculateScore(). Ordinea conteaza: cuvintele-cheie
+// mai specifice sunt verificate inaintea celor generice (ex. "bdrip" inaintea lui "bd").
+const QUALITY_DISPLAY_LABELS = [
+    ['bdremux', 'BDRemux'], ['remux', 'Remux'], ['blu-ray', 'BluRay'], ['bluray', 'BluRay'],
+    ['bdrip', 'BDRip'], ['brrip', 'BRRip'], ['uhd', 'UHD'], ['hddvd', 'HD-DVD'], ['bd', 'BD'],
+    ['web-dl', 'WEB-DL'], ['webdl', 'WEB-DL'], ['webrip', 'WEBRip'], ['web', 'WEB'],
+    ['hdtv', 'HDTV'], ['pdtv', 'PDTV'], ['dsr', 'DSR'], ['tvrip', 'TVRip'],
+    ['dvdrip', 'DVDRip'], ['dvdscr', 'DVDScr'], ['screener', 'Screener'], ['r5', 'R5'], ['hdrip', 'HDRip'],
+    ['telesync', 'TS'], ['telecine', 'TC'], ['hdcam', 'HDCam'], ['cam', 'CAM'], ['ts', 'TS'], ['tc', 'TC']
+];
+
+// Detecteaza eticheta de calitate direct din titlul subtitrarii (nu din numele
+// fisierului video) - fiecare subtitrare de pe RegieLive isi are propriul tip de sursa.
+function detectQualityLabel(subTitle) {
+    const t = (subTitle || '').toLowerCase();
+    for (const [keyword, label] of QUALITY_DISPLAY_LABELS) {
+        if (t.includes(keyword)) return label;
+    }
+    return null;
+}
 
 builder.defineSubtitlesHandler(async function(args) {
     const videoFilename = (args.extra && args.extra.filename) ? args.extra.filename : "";
@@ -77,6 +98,18 @@ builder.defineSubtitlesHandler(async function(args) {
                 } else if (videoSource.family === subSource.family) {
                     score += 45;
                     sourceMatch = `${subSource.keyword}~${videoSource.keyword}`;
+                }
+
+                // Mic bonus in familia "disc": BluRay/Remux/UHD (rip nealterat) vs
+                // BDRip/BRRip (transcodare comprimata) scorau identic, asa ca un BDRip
+                // mai popular putea iesi mereu peste un BluRay etichetat corect, doar
+                // din cauza departajarii pe rating. Nu schimba familia/sincronizarea
+                // (raman ambele "disc"), doar inclina departajarea finala.
+                const DISC_PREMIUM_SOURCES = ['bluray', 'blu-ray', 'remux', 'uhd'];
+                const isDiscPremium = (text) => DISC_PREMIUM_SOURCES.some(kw => text.includes(kw));
+                if (videoSource.family === 'disc' && subSource.family === 'disc' &&
+                    isDiscPremium(videoFilenameLower) && isDiscPremium(subTitleLower)) {
+                    score += 3;
                 }
             }
 
@@ -161,12 +194,22 @@ builder.defineSubtitlesHandler(async function(args) {
     let subtitles = subs.map(sub => {
         const downloadUrl = sub.url.startsWith('http') ? sub.url : `https://subtitrari.regielive.ro${sub.url}`;
         const { score, breakdown } = calculateScore(sub.title, sub.rating);
+        const cleanTitle = sub.title || "RegieLive";
+        const qualityLabel = detectQualityLabel(sub.title) || "RegieLive";
 
         return {
-            id: sub.id,
+            // Protocolul Stremio nu impune niciun format lui "id" si nu-l foloseste la
+            // descarcarea efectiva (asta face "url"-ul de mai jos) - deci putem baga in
+            // el eticheta de calitate fara risc. Stremio nu afiseaza acest camp (arata
+            // doar numele addon-ului), dar Nuvio il afiseaza direct sub limba.
+            id: `${qualityLabel.replace(/\s+/g, '-')}-${sub.id}`,
             url: `${APP_URL}/download.vtt?url=${encodeURIComponent(downloadUrl)}&cookie=${encodeURIComponent(sub.cookie || '')}${episodeParams}`,
             lang: "ron",
-            title: sub.title || "RegieLive",
+            title: `${qualityLabel} | ${cleanTitle}`,
+            // "label" e campul documentat oficial in modelul de subtitrare al Nuvio
+            // (id/url/lang/label) ca text de afisat sub limba. Stremio il ignora
+            // (cerere deschisa, nefinalizata - stremio-core issue #936).
+            label: `${qualityLabel} · RegieLive`,
             score,
             breakdown
         };
@@ -197,7 +240,8 @@ builder.defineSubtitlesHandler(async function(args) {
         id: sub.id,
         url: sub.url,
         lang: sub.lang,
-        title: sub.title
+        title: sub.title,
+        label: sub.label
     }));
 
     return { subtitles: subtitles };

@@ -90,6 +90,29 @@ function entryMatchesEpisode(entryName, season, episode) {
            new RegExp(`\\bep?(?:isod(?:e|ul)?)?[\\s._-]*0?${episode}(?!\\d)`, 'i').test(entryName);
 }
 
+// Unele arhive de pe RegieLive contin de fapt fisiere din mai multe limbi
+// ("...ro...", "...uk-hi...", "...uk..."), fara nicio diferenta de scor intre ele -
+// tie-break-ul pe marime alegea silentios varianta straina (adesea mai mare, din
+// cauza descrierilor audio pt. hipoacuzici) in locul celei romane de langa ea.
+// Verificam token cu token (nu substring, ca sa nu prindem "ro" din interiorul
+// altor cuvinte precum numele unui grup de release).
+const RO_LANG_TOKENS = new Set(['ro', 'rom', 'ron', 'romana', 'romina', 'rumana']);
+const FOREIGN_LANG_TOKENS = new Set([
+    'en', 'eng', 'uk', 'gb', 'us', 'usa',
+    'fr', 'fra', 'fre', 'de', 'ger', 'deu', 'es', 'spa', 'it', 'ita',
+    'nl', 'dut', 'nld', 'pt', 'por', 'bra', 'ru', 'rus', 'hu', 'hun',
+    'bg', 'bul', 'gr', 'gre', 'ell', 'tr', 'tur', 'pl', 'pol',
+    'cz', 'cze', 'ces', 'sk', 'slo', 'ar', 'ara', 'zh', 'chi', 'zho',
+    'ja', 'jpn', 'ko', 'kor'
+]);
+
+function detectArchiveEntryLanguage(entryName) {
+    const tokens = entryName.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (tokens.some(t => RO_LANG_TOKENS.has(t))) return 'ro';
+    if (tokens.some(t => FOREIGN_LANG_TOKENS.has(t))) return 'foreign';
+    return null;
+}
+
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
 let globalDownloadQueue = Promise.resolve();
@@ -205,6 +228,20 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
         }
 
         if (candidates.length > 0) {
+            // Excludem fisierele identificate CU CERTITUDINE ca fiind in alta limba decat
+            // romana - dar doar daca ramane cel putin o alternativa (marcata explicit "ro",
+            // sau fara niciun marcaj de limba deloc, cazul majoritatii arhivelor RegieLive).
+            // Daca TOATE fisierele par straine (sau niciunul nu e clar), nu ghicim si lasam
+            // comportamentul obisnuit sa decida, neschimbat.
+            const withLang = candidates.map(c => ({ entry: c, lang: detectArchiveEntryLanguage(c.entryName) }));
+            const nonForeign = withLang.filter(c => c.lang !== 'foreign').map(c => c.entry);
+            if (nonForeign.length > 0 && nonForeign.length < candidates.length) {
+                const excluded = withLang.filter(c => c.lang === 'foreign').map(c => c.entry.entryName);
+                console.log(`[ARHIVĂ] Exclud ${excluded.length} fișier(e) dintr-o altă limbă: ${excluded.join(', ')}`);
+                candidates.length = 0;
+                candidates.push(...nonForeign);
+            }
+
             if (knownSeason && knownEpisode) {
                 const matched = candidates.filter(c => entryMatchesEpisode(c.entryName, knownSeason, knownEpisode));
                 if (matched.length > 0) {
