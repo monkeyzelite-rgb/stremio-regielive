@@ -1,3 +1,4 @@
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const { getRouter } = require('stremio-addon-sdk');
@@ -7,6 +8,21 @@ const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 const { clearSearchCache } = require('./lib/regielive');
+
+// node-unrar-js isi incarca singur fisierul unrar.wasm de pe disc, printr-un mecanism
+// intern (Emscripten) care construieste calea dinamic. Pe Render/local, cu tot
+// node_modules-ul pe disc, mecanismul implicit functioneaza oricum - dar citim noi insine
+// bytes-ii cu un require.resolve() static si-i dam explicit librariei, ca sa nu depindem
+// deloc de acel mecanism intern (util si daca addon-ul se muta vreodata pe un mediu care
+// impacheteaza altfel node_modules, ex. un build serverless).
+let unrarWasmBinary = null;
+try {
+    const wasmPath = require.resolve('node-unrar-js/dist/js/unrar.wasm');
+    const wasmBuffer = fs.readFileSync(wasmPath);
+    unrarWasmBinary = wasmBuffer.buffer.slice(wasmBuffer.byteOffset, wasmBuffer.byteOffset + wasmBuffer.byteLength);
+} catch (err) {
+    console.warn(`[RAR] Nu am putut preincarca unrar.wasm (${err.message}) — folosesc mecanismul implicit al librăriei.`);
+}
 
 const app = express();
 app.use(cors()); // <--- FIX iOS: fara asta, AVPlayer (playerul nativ folosit de Stremio pe iOS) poate respinge tacit request-ul catre /download
@@ -113,6 +129,224 @@ function detectArchiveEntryLanguage(entryName) {
     return null;
 }
 
+// Recunoaste tipul de arhiva dupa primii bytes (magic number), nu dupa extensie -
+// RegieLive nu trimite extensia reala in URL. PK.. = ZIP, Rar! = RAR.
+function detectArchiveType(buffer) {
+    if (buffer.length < 4) return 'unknown';
+    if (buffer[0] === 0x50 && buffer[1] === 0x4B) return 'zip';
+    if (buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 && buffer[3] === 0x21) return 'rar';
+    return 'unknown';
+}
+
+// Cate un nivel de recursie e suficient pt. cazul real posibil (pachet "serie completa" =
+// o arhiva exterioara ce contine cate o arhiva per sezon) si opreste orice risc de
+// arhiva-in-arhiva-in-arhiva construita malitios.
+const MAX_NESTED_DEPTH = 1;
+// Limita pt. o arhiva imbricata (un pachet de sezon nu ar trebui sa depaseasca asta) -
+// verificata atat pe marimea declarata (filtru rapid, inainte de decomprimare) cat si pe
+// marimea reala dupa decomprimare (un header falsificat intr-o arhiva construita malitios
+// poate declara marime mica si decomprima la ceva mult mai mare - decompression bomb).
+const MAX_NESTED_ARCHIVE_SIZE = 20 * 1024 * 1024; // 20MB
+// Limita pt. fisierul final de subtitrare - la fel, verificata declarat + real.
+const MAX_SUBTITLE_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+// Un pachet "serie completa" e adesea o arhiva exterioara ce contine cate o arhiva per
+// sezon (ex: "Serial.S04.720p.BluRay-Grup.rar"). Daca stim sigur sezonul cerut (din ID-ul
+// Stremio) si EXACT una dintre arhivele imbricate il mentioneaza, o putem identifica fara
+// ambiguitate - altfel (zero sau mai multe potriviri) nu ghicim.
+function findSeasonMatchedNestedArchive(nestedNames, knownSeason) {
+    const season = String(knownSeason);
+    const pattern = new RegExp(`\\bs0?${season}\\b|\\bseason[\\s._-]*0?${season}\\b|\\bsezonul[\\s._-]*0?${season}\\b`, 'i');
+    const matches = nestedNames.filter(name => pattern.test(name));
+    return matches.length === 1 ? matches[0] : null;
+}
+
+// Alege cea mai buna subtitrare dintr-o lista de candidati {name, size} - comuna pentru
+// ZIP si RAR. Exclude fisierele in alta limba (cand ramane o alternativa), alege dupa
+// sezon/episod cunoscut cand exista (refuzand sa ghiceasca dupa marime daca e ambiguu),
+// altfel cea mai mare ca dimensiune.
+function pickBestSubtitleFile(candidates, knownSeason, knownEpisode) {
+    if (candidates.length === 0) return null;
+
+    const withLang = candidates.map(c => ({ c, lang: detectArchiveEntryLanguage(c.name) }));
+    const nonForeign = withLang.filter(x => x.lang !== 'foreign').map(x => x.c);
+    let pool = candidates;
+    if (nonForeign.length > 0 && nonForeign.length < candidates.length) {
+        const excluded = withLang.filter(x => x.lang === 'foreign').map(x => x.c.name);
+        console.log(`[ARHIVĂ] Exclud ${excluded.length} fișier(e) dintr-o altă limbă: ${excluded.join(', ')}`);
+        pool = nonForeign;
+    }
+
+    let chosen = null;
+    if (knownSeason && knownEpisode) {
+        const matched = pool.filter(c => entryMatchesEpisode(c.name, knownSeason, knownEpisode));
+        if (matched.length > 0) {
+            matched.sort((a, b) => (b.size || 0) - (a.size || 0));
+            chosen = matched[0];
+        } else if (pool.length > 1) {
+            // Mai multe fisiere, dar niciunul nu poate fi identificat cert ca fiind episodul
+            // cerut - refuzam sa ghicim dupa marime (poate alege gresit episodul).
+            const wanted = `S${String(knownSeason).padStart(2, '0')}E${String(knownEpisode).padStart(2, '0')}`;
+            console.error(`[ARHIVĂ] ${pool.length} fișiere găsite, dar niciunul nu poate fi identificat cert ca ${wanted} — refuz să aleg după mărime: ${pool.map(c => c.name).join(', ')}`);
+            throw new Error('EPISODE_NOT_IDENTIFIED');
+        }
+        // un singur candidat si season/episode cunoscute dar fara match explicit in nume ->
+        // il folosim oricum mai jos (nicio ambiguitate posibila cu un singur fisier)
+    }
+
+    if (!chosen) {
+        pool.sort((a, b) => (b.size || 0) - (a.size || 0));
+        chosen = pool[0];
+    }
+
+    if (pool.length > 1) {
+        console.log(`[ARHIVĂ] ${pool.length} fișiere de subtitrare găsite, aleg:`);
+        pool.forEach((c) => {
+            const marker = c === chosen ? '  <-- ALES' : '';
+            console.log(`    "${c.name}" — ${c.size} bytes${marker}`);
+        });
+    }
+
+    return chosen;
+}
+
+// Extrage subtitrarea dintr-un buffer ZIP. Recurge o data intr-o arhiva imbricata
+// (pachet de sezon) daca sezonul cerut identifica fara ambiguitate care dintre ele.
+async function extractFromZip(buffer, knownSeason, knownEpisode, depth = 0) {
+    const zip = new AdmZip(buffer);
+    const zipEntries = zip.getEntries();
+
+    const candidates = [];
+    for (const entry of zipEntries) {
+        const fileName = entry.entryName.toLowerCase();
+        const baseName = fileName.split('/').pop();
+        if (fileName.includes('__macosx') || baseName.startsWith('.')) continue;
+        if ((fileName.endsWith('.srt') || fileName.endsWith('.sub') || fileName.endsWith('.ass') || fileName.endsWith('.ssa')) &&
+            (entry.header.size || 0) <= MAX_SUBTITLE_FILE_SIZE) {
+            candidates.push({ name: entry.entryName, size: entry.header.size || 0, _entry: entry });
+        }
+    }
+
+    if (candidates.length === 0) {
+        // Nicio subtitrare directa - poate arhiva contine alte arhive (pachet de sezon).
+        // Arhiva imbricata are prioritate fata de fallback-ul .txt de mai jos.
+        const nestedEntries = zipEntries.filter(e => /\.(rar|zip)$/i.test(e.entryName));
+        if (nestedEntries.length > 0) {
+            const matchedName = (knownSeason && depth < MAX_NESTED_DEPTH)
+                ? findSeasonMatchedNestedArchive(nestedEntries.map(e => e.entryName), knownSeason)
+                : null;
+            const matched = matchedName ? nestedEntries.find(e => e.entryName === matchedName) : null;
+
+            if (matched && (matched.header.size || 0) <= MAX_NESTED_ARCHIVE_SIZE) {
+                const nestedBuffer = matched.getData();
+                if (nestedBuffer.length <= MAX_NESTED_ARCHIVE_SIZE) {
+                    console.log(`[ZIP] Arhivă cu ${nestedEntries.length} arhive imbricate — recurg în cea a sezonului cunoscut: "${matched.entryName}"`);
+                    const nestedType = detectArchiveType(nestedBuffer);
+                    if (nestedType === 'zip') return await extractFromZip(nestedBuffer, knownSeason, knownEpisode, depth + 1);
+                    if (nestedType === 'rar') return await extractFromRar(nestedBuffer, knownSeason, knownEpisode, depth + 1);
+                } else {
+                    console.error(`[ZIP] Arhiva imbricată "${matched.entryName}" a decomprimat la ${nestedBuffer.length} bytes — peste limită, o ignor (header posibil incorect).`);
+                }
+            }
+
+            console.error(`[ZIP] Arhivă cu ${nestedEntries.length} arhive imbricate (probabil pachet multi-sezon), nu pot identifica fără ambiguitate în care e episodul: ${nestedEntries.map(e => e.entryName).join(', ')}`);
+            throw new Error('NESTED_ARCHIVE_UNSUPPORTED');
+        }
+
+        // Fallback .txt - validam continutul, ca sa nu luam orbeste un README drept subtitrare.
+        for (const entry of zipEntries) {
+            const fileName = entry.entryName.toLowerCase();
+            const baseName = fileName.split('/').pop();
+            if (fileName.includes('__macosx') || baseName.startsWith('.') || !fileName.endsWith('.txt')) continue;
+
+            const preview = entry.getData().slice(0, 200).toString('utf8');
+            if (preview.includes('-->') || /^\d+\s*\r?\n/.test(preview)) {
+                const data = entry.getData();
+                if (data.length === 0) throw new Error('SUBTITLE_EMPTY');
+                return { data, isAss: false };
+            }
+        }
+
+        throw new Error('NO_SRT');
+    }
+
+    const best = pickBestSubtitleFile(candidates, knownSeason, knownEpisode);
+    const rawData = best._entry.getData();
+    if (rawData.length === 0) throw new Error('SUBTITLE_EMPTY');
+    if (rawData.length > MAX_SUBTITLE_FILE_SIZE) throw new Error('SUBTITLE_TOO_LARGE');
+    const isAss = /\.(ass|ssa)$/i.test(best.name);
+    return { data: rawData, isAss };
+}
+
+// Extrage subtitrarea dintr-un buffer RAR, cu aceeasi logica de selectie candidati si
+// recursie in arhive imbricate ca la ZIP.
+async function extractFromRar(buffer, knownSeason, knownEpisode, depth = 0) {
+    try {
+        const { createExtractorFromData } = require('node-unrar-js');
+        const extractor = await createExtractorFromData(
+            unrarWasmBinary ? { data: buffer, wasmBinary: unrarWasmBinary } : { data: buffer }
+        );
+        const list = extractor.getFileList();
+        const fileHeaders = [...list.fileHeaders];
+
+        const candidates = fileHeaders
+            .filter(h => {
+                const fn = h.name.toLowerCase();
+                return (fn.endsWith('.srt') || fn.endsWith('.sub') || fn.endsWith('.ass') || fn.endsWith('.ssa')) &&
+                       (h.unpSize || h.packSize || 0) <= MAX_SUBTITLE_FILE_SIZE;
+            })
+            .map(h => ({ name: h.name, size: h.unpSize || h.packSize || 0 }));
+
+        if (candidates.length === 0) {
+            const nested = fileHeaders.filter(h => /\.(rar|zip)$/i.test(h.name));
+            if (nested.length > 0) {
+                const matchedName = (knownSeason && depth < MAX_NESTED_DEPTH)
+                    ? findSeasonMatchedNestedArchive(nested.map(h => h.name), knownSeason)
+                    : null;
+                const matchedHeader = matchedName ? nested.find(h => h.name === matchedName) : null;
+                const matchedSize = matchedHeader ? (matchedHeader.unpSize || matchedHeader.packSize || 0) : 0;
+
+                if (matchedHeader && matchedSize <= MAX_NESTED_ARCHIVE_SIZE) {
+                    const nestedExtracted = extractor.extract({ files: [matchedHeader.name] });
+                    const nestedFiles = [...nestedExtracted.files];
+                    if (nestedFiles.length > 0 && nestedFiles[0].extraction) {
+                        const nestedBuffer = Buffer.from(nestedFiles[0].extraction);
+                        if (nestedBuffer.length <= MAX_NESTED_ARCHIVE_SIZE) {
+                            console.log(`[RAR] Arhivă cu ${nested.length} arhive imbricate — recurg în cea a sezonului cunoscut: "${matchedHeader.name}"`);
+                            const nestedType = detectArchiveType(nestedBuffer);
+                            if (nestedType === 'zip') return await extractFromZip(nestedBuffer, knownSeason, knownEpisode, depth + 1);
+                            if (nestedType === 'rar') return await extractFromRar(nestedBuffer, knownSeason, knownEpisode, depth + 1);
+                        } else {
+                            console.error(`[RAR] Arhiva imbricată "${matchedHeader.name}" a decomprimat la ${nestedBuffer.length} bytes — peste limită, o ignor (header posibil incorect).`);
+                        }
+                    }
+                }
+
+                console.error(`[RAR] Arhivă cu ${nested.length} arhive imbricate (probabil pachet multi-sezon), nu pot identifica fără ambiguitate în care e episodul: ${nested.map(h => h.name).join(', ')}`);
+                throw new Error('NESTED_ARCHIVE_UNSUPPORTED');
+            }
+            throw new Error('NO_SRT');
+        }
+
+        const best = pickBestSubtitleFile(candidates, knownSeason, knownEpisode);
+        const extracted = extractor.extract({ files: [best.name] });
+        const files = [...extracted.files];
+        if (files.length === 0 || !files[0].extraction) throw new Error('RAR_EXTRACT_FAILED');
+
+        const finalBuffer = Buffer.from(files[0].extraction);
+        if (finalBuffer.length === 0) throw new Error('SUBTITLE_EMPTY');
+        if (finalBuffer.length > MAX_SUBTITLE_FILE_SIZE) throw new Error('SUBTITLE_TOO_LARGE');
+        return { data: finalBuffer, isAss: /\.(ass|ssa)$/i.test(best.name) };
+    } catch (err) {
+        if (err.message === 'EPISODE_NOT_IDENTIFIED' || err.message === 'NESTED_ARCHIVE_UNSUPPORTED' ||
+            err.message === 'SUBTITLE_EMPTY' || err.message === 'SUBTITLE_TOO_LARGE' || err.message === 'NO_SRT') {
+            throw err;
+        }
+        console.error('[RAR] Eroare la extracție:', err.message);
+        throw new Error('RAR_EXTRACT_FAILED');
+    }
+}
+
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
 let globalDownloadQueue = Promise.resolve();
@@ -183,10 +417,14 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
             }
         });
 
-        let zip;
-        try {
-            zip = new AdmZip(response.data);
-        } catch (e) {
+        const archiveType = detectArchiveType(response.data);
+        let extracted;
+
+        if (archiveType === 'zip') {
+            extracted = await extractFromZip(response.data, knownSeason, knownEpisode);
+        } else if (archiveType === 'rar') {
+            extracted = await extractFromRar(response.data, knownSeason, knownEpisode);
+        } else {
             // Diagnostic: aflăm EXACT ce am primit înapoi, ca să nu mai ghicim
             const contentType = response.headers['content-type'] || 'necunoscut';
             const fullBody = Buffer.from(response.data).toString('utf8');
@@ -198,102 +436,17 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
                 'just a moment', 'checking your browser', 'eroare', 'not found', '404'];
             const foundKeywords = suspectKeywords.filter(k => fullBody.toLowerCase().includes(k));
 
-            console.error('[X] Fișierul nu e ZIP!');
+            console.error('[X] Fișierul nu e o arhivă cunoscută (ZIP/RAR)!');
             console.error(`    Status HTTP: ${response.status}`);
             console.error(`    Content-Type primit: ${contentType}`);
             console.error(`    Dimensiune răspuns: ${response.data.length} bytes`);
             console.error(`    <title> pagină: ${pageTitle}`);
             console.error(`    Cuvinte-cheie suspecte găsite: ${foundKeywords.length ? foundKeywords.join(', ') : '(niciunul)'}`);
             console.error(`    Primele 1000 caractere din răspuns:\n${fullBody.slice(0, 1000)}`);
-            throw new Error('NOT_A_ZIP');
+            throw new Error('UNKNOWN_ARCHIVE_FORMAT');
         }
 
-        const zipEntries = zip.getEntries();
-        let subtitleEntry = null;
-        let isAss = false;
-
-        // 1. Căutăm fișierele .srt/.sub/.ass/.ssa. Dacă sunt mai multe (ex: film + bonus/
-        // documentar/extra, sau pachet de sezon cu mai multe episoade), alegem pe cel care
-        // se potrivește sezonului+episodului cerut (când le știm); altfel, cel mai mare ca
-        // dimensiune - subtitrarea filmului întreg are mult mai multe rânduri decât un extra.
-        const candidates = [];
-        for (const entry of zipEntries) {
-            const fileName = entry.entryName.toLowerCase();
-            const baseName = fileName.split('/').pop();
-            if (fileName.includes('__macosx') || baseName.startsWith('.')) continue;
-
-            if (fileName.endsWith('.srt') || fileName.endsWith('.sub') || fileName.endsWith('.ass') || fileName.endsWith('.ssa')) {
-                candidates.push(entry);
-            }
-        }
-
-        if (candidates.length > 0) {
-            // Excludem fisierele identificate CU CERTITUDINE ca fiind in alta limba decat
-            // romana - dar doar daca ramane cel putin o alternativa (marcata explicit "ro",
-            // sau fara niciun marcaj de limba deloc, cazul majoritatii arhivelor RegieLive).
-            // Daca TOATE fisierele par straine (sau niciunul nu e clar), nu ghicim si lasam
-            // comportamentul obisnuit sa decida, neschimbat.
-            const withLang = candidates.map(c => ({ entry: c, lang: detectArchiveEntryLanguage(c.entryName) }));
-            const nonForeign = withLang.filter(c => c.lang !== 'foreign').map(c => c.entry);
-            if (nonForeign.length > 0 && nonForeign.length < candidates.length) {
-                const excluded = withLang.filter(c => c.lang === 'foreign').map(c => c.entry.entryName);
-                console.log(`[ARHIVĂ] Exclud ${excluded.length} fișier(e) dintr-o altă limbă: ${excluded.join(', ')}`);
-                candidates.length = 0;
-                candidates.push(...nonForeign);
-            }
-
-            if (knownSeason && knownEpisode) {
-                const matched = candidates.filter(c => entryMatchesEpisode(c.entryName, knownSeason, knownEpisode));
-                if (matched.length > 0) {
-                    matched.sort((a, b) => (b.header.size || 0) - (a.header.size || 0));
-                    subtitleEntry = matched[0];
-                } else if (candidates.length > 1) {
-                    // Mai multe fisiere, dar niciunul nu poate fi identificat cert ca fiind
-                    // episodul cerut - refuzam sa ghicim dupa marime (poate alege gresit episodul).
-                    const wanted = `S${String(knownSeason).padStart(2, '0')}E${String(knownEpisode).padStart(2, '0')}`;
-                    console.error(`[ARHIVĂ] ${candidates.length} fișiere găsite, dar niciunul nu poate fi identificat cert ca ${wanted} — refuz să aleg după mărime: ${candidates.map(c => c.entryName).join(', ')}`);
-                    throw new Error('EPISODE_NOT_IDENTIFIED');
-                }
-                // un singur candidat si season/episode cunoscute dar fara match explicit in nume ->
-                // il folosim oricum mai jos (nicio ambiguitate posibila cu un singur fisier)
-            }
-
-            if (!subtitleEntry) {
-                candidates.sort((a, b) => (b.header.size || 0) - (a.header.size || 0));
-                subtitleEntry = candidates[0];
-            }
-
-            if (candidates.length > 1) {
-                console.log(`[ARHIVĂ] ${candidates.length} fișiere de subtitrare găsite în ZIP, aleg:`);
-                candidates.forEach((c) => {
-                    const marker = c === subtitleEntry ? '  <-- ALES' : '';
-                    console.log(`    "${c.entryName}" — ${c.header.size} bytes${marker}`);
-                });
-            }
-
-            isAss = /\.(ass|ssa)$/i.test(subtitleEntry.entryName);
-        }
-
-        // 2. Dacă nu e .srt/.ass, căutăm alte formate suportate - dar validăm conținutul,
-        // ca să nu luăm orbește un README/Citeste-ma.txt drept subtitrare.
-        if (!subtitleEntry) {
-            for (const entry of zipEntries) {
-                const fileName = entry.entryName.toLowerCase();
-                const baseName = fileName.split('/').pop();
-                if (fileName.includes('__macosx') || baseName.startsWith('.') || !fileName.endsWith('.txt')) continue;
-
-                const preview = entry.getData().slice(0, 200).toString('utf8');
-                if (preview.includes('-->') || /^\d+\s*\r?\n/.test(preview)) {
-                    subtitleEntry = entry;
-                    break;
-                }
-            }
-        }
-
-        if (!subtitleEntry) throw new Error('NO_SRT');
-
-        const rawData = subtitleEntry.getData();
-        if (rawData.length === 0) throw new Error('SUBTITLE_EMPTY');
+        const { data: rawData, isAss } = extracted;
 
         const detected = jschardet.detect(rawData);
 
