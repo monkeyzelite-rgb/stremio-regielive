@@ -2,6 +2,9 @@
 
 **[English](#english)** | **[Română](#română)**
 
+📖 **Vrei propria ta instanță (recomandat)?** Vezi [ghidul de instalare](INSTALL.md) — 5-10 minute, gratuit, se poate face și cu ajutorul unui AI.
+📖 **Want your own instance (recommended)?** See the [installation guide](INSTALL.md) — 5-10 minutes, free, can be done with AI help too.
+
 ---
 
 <a name="română"></a>

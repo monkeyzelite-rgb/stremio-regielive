@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: stremio-regielive
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install
+    startCommand: node keep-alive.js & node server.js
+    envVars:
+      - key: ADMIN_KEY
+        generateValue: true

@@ -2,8 +2,12 @@ const { addonBuilder } = require("stremio-addon-sdk");
 const manifest = require("./manifest");
 const { searchRegieLive } = require("./lib/regielive");
 
-// AICI ESTE LINIA ADĂUGATĂ:
-const APP_URL = 'https://stremio-regielive-rjps.onrender.com';
+// URL-ul public al acestei instanțe, folosit la generarea link-urilor de /download.
+// Ordine: APP_URL explicit (util pt. un deploy in afara Render, ex. Raspberry Pi +
+// Cloudflare Tunnel) -> RENDER_EXTERNAL_URL (injectat automat de Render pe orice web
+// service, deci cine face fork si deployeaza pe Render nu trebuie sa configureze nimic
+// manual) -> fallback-ul original, pt. rulare locala fara nicio variabila de mediu setata.
+const APP_URL = process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || 'https://stremio-regielive-rjps.onrender.com';
 
 const builder = new addonBuilder(manifest);
 

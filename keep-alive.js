@@ -1,7 +1,9 @@
 const https = require('https');
 
-// URL-ul tău real de pe Render
-const RENDER_URL = 'https://stremio-regielive-rjps.onrender.com/manifest.json';
+// Aceeași ordine de fallback ca APP_URL din addon.js - fara asta, un fork deployat pe
+// Render ar continua sa faca ping la instanta originala in loc de a lui, ceea ce nu
+// previne deloc spin-down-ul propriu si adauga trafic inutil la celalalt server.
+const RENDER_URL = (process.env.APP_URL || process.env.RENDER_EXTERNAL_URL || 'https://stremio-regielive-rjps.onrender.com') + '/manifest.json';
 
 console.log('[Anti-Sleep] Serviciul de mentinere activa a pornit.');
 
