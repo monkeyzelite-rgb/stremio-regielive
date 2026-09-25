@@ -401,6 +401,26 @@ let globalDownloadQueue = Promise.resolve();
 // sa devii independent de restul fork-urilor - fara ea, comportamentul e neschimbat.
 const API_KEY = process.env.REGIELIVE_API_KEY || 'API-BAZARR-YTZ-SL';
 
+// Reincearca automat o descarcare care a picat cu 429 (rate-limit trecator la RegieLive) -
+// confirmat pe productie (Mega-Subtitles-Addon, aceeasi sursa) ca aceste esecuri sunt
+// adesea trecatoare (functioneaza la o reincercare manuala, la cateva secunde distanta).
+// Doar 429 se reincearca; orice alta eroare (retea, 404 etc.) e aruncata imediat, neschimbata.
+const DOWNLOAD_RETRY_DELAYS_MS = [1500, 3000];
+
+async function fetchWithRetry429(axiosConfig) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await axios(axiosConfig);
+        } catch (err) {
+            const is429 = err.response && err.response.status === 429;
+            if (!is429 || attempt >= DOWNLOAD_RETRY_DELAYS_MS.length) throw err;
+            const delay = DOWNLOAD_RETRY_DELAYS_MS[attempt];
+            console.warn(`[REGIELIVE] 429 la descărcare, reîncerc peste ${delay}ms (încercarea ${attempt + 2}/${DOWNLOAD_RETRY_DELAYS_MS.length + 1}).`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+}
+
 app.use(getRouter(addonInterface));
 
 // Ruta de debug pentru golirea manuala a cache-urilor, fara redeploy.
@@ -452,7 +472,7 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
 
     const downloadTask = async () => {
         console.log(`\n[DESCARCARE] Extrag de pe RegieLive: ${zipUrl}`);
-        const response = await axios({
+        const response = await fetchWithRetry429({
             method: 'get',
             url: zipUrl,
             responseType: 'arraybuffer',
