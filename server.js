@@ -98,6 +98,48 @@ function assToSrt(assText) {
     return cues.map((c, i) => `${i + 1}\n${c.start} --> ${c.end}\n${c.text}\n`).join('\n');
 }
 
+// Detectie + convertor MicroDVD (.sub cu timestamp-uri pe CADRE, nu pe timp:
+// "{508}{583}text", "|" in loc de linie noua) -> SRT. Extensia ".sub" e ambigua -
+// o poate avea si un .sub obisnuit (stil SubViewer, cu timp), care trece deja
+// corect prin srtToVtt(); fara detectie de continut, un MicroDVD ar trece
+// nedetectat si ar iesi ca WebVTT gol, fara niciun cue, fara nicio eroare vizibila.
+// Fara header de fps in fisier, 23.976fps e standardul de facto pt. rip-urile
+// din aceasta comunitate (era confirmata separat, in Mega-Subtitles-Addon).
+const MICRODVD_DEFAULT_FPS = 23.976;
+
+function isMicroDvdText(text) {
+    const firstLine = String(text).replace(/^﻿/, '').trimStart().split(/\r?\n/, 1)[0] || '';
+    return /^\{\d+\}\{\d+\}/.test(firstLine);
+}
+
+function microDvdToSrt(microDvdText, fps = MICRODVD_DEFAULT_FPS) {
+    const lines = String(microDvdText).replace(/\r\n/g, '\n').split('\n');
+    const cues = [];
+
+    const frameToSrtTime = (frame) => {
+        let ms = Math.round((frame / fps) * 1000);
+        const h = Math.floor(ms / 3600000); ms -= h * 3600000;
+        const m = Math.floor(ms / 60000); ms -= m * 60000;
+        const s = Math.floor(ms / 1000); ms -= s * 1000;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms).padStart(3, '0')}`;
+    };
+
+    for (const line of lines) {
+        const m = line.match(/^\{(\d+)\}\{(\d+)\}(.*)$/);
+        if (!m) continue;
+        const [, startFrame, endFrame, rawText] = m;
+        // Codurile de stil MicroDVD ("{y:i}" italic, "{c:$FFFFFF}" culoare, etc.) apar
+        // ca bloc separat de perechea obligatorie {start}{end} - le eliminam ca sa nu
+        // apara ca text vizibil literal.
+        const cleanText = rawText.replace(/\{[a-zA-Z]:[^}]*\}/g, '').replace(/\|/g, '\n').trim();
+        if (!cleanText) continue;
+        cues.push({ start: frameToSrtTime(parseInt(startFrame, 10)), end: frameToSrtTime(parseInt(endFrame, 10)), text: cleanText });
+    }
+
+    cues.sort((a, b) => a.start.localeCompare(b.start));
+    return cues.map((c, i) => `${i + 1}\n${c.start} --> ${c.end}\n${c.text}\n`).join('\n');
+}
+
 // Recunoaste conventiile uzuale de numerotare episod intr-un nume de fisier din arhiva.
 // Deliberat NU accepta un numar simplu fara context (ex: doar "05") - prea ambiguu (rezolutie/an/etc).
 function entryMatchesEpisode(entryName, season, episode) {
@@ -275,7 +317,8 @@ async function extractFromZip(buffer, knownSeason, knownEpisode, depth = 0) {
     if (rawData.length === 0) throw new Error('SUBTITLE_EMPTY');
     if (rawData.length > MAX_SUBTITLE_FILE_SIZE) throw new Error('SUBTITLE_TOO_LARGE');
     const isAss = /\.(ass|ssa)$/i.test(best.name);
-    return { data: rawData, isAss };
+    const isMicroDvd = !isAss && isMicroDvdText(rawData.toString('latin1', 0, 200));
+    return { data: rawData, isAss, isMicroDvd };
 }
 
 // Extrage subtitrarea dintr-un buffer RAR, cu aceeasi logica de selectie candidati si
@@ -336,7 +379,9 @@ async function extractFromRar(buffer, knownSeason, knownEpisode, depth = 0) {
         const finalBuffer = Buffer.from(files[0].extraction);
         if (finalBuffer.length === 0) throw new Error('SUBTITLE_EMPTY');
         if (finalBuffer.length > MAX_SUBTITLE_FILE_SIZE) throw new Error('SUBTITLE_TOO_LARGE');
-        return { data: finalBuffer, isAss: /\.(ass|ssa)$/i.test(best.name) };
+        const isAss = /\.(ass|ssa)$/i.test(best.name);
+        const isMicroDvd = !isAss && isMicroDvdText(finalBuffer.toString('latin1', 0, 200));
+        return { data: finalBuffer, isAss, isMicroDvd };
     } catch (err) {
         if (err.message === 'EPISODE_NOT_IDENTIFIED' || err.message === 'NESTED_ARCHIVE_UNSUPPORTED' ||
             err.message === 'SUBTITLE_EMPTY' || err.message === 'SUBTITLE_TOO_LARGE' || err.message === 'NO_SRT') {
@@ -350,7 +395,11 @@ async function extractFromRar(buffer, knownSeason, knownEpisode, depth = 0) {
 const subtitlesCache = new Map();
 const activeDownloads = new Map();
 let globalDownloadQueue = Promise.resolve();
-const API_KEY = 'API-BAZARR-YTZ-SL'; 
+// Cheia implicita e comuna (integrare tip Bazarr) - oricine ruleaza un fork foloseste
+// aceeasi, deci concureaza pe acelasi buget de rate-limit la RegieLive. Daca ai o cheie
+// personala de la RegieLive, seteaz-o in REGIELIVE_API_KEY (Render -> Environment) ca
+// sa devii independent de restul fork-urilor - fara ea, comportamentul e neschimbat.
+const API_KEY = process.env.REGIELIVE_API_KEY || 'API-BAZARR-YTZ-SL';
 
 app.use(getRouter(addonInterface));
 
@@ -446,7 +495,7 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
             throw new Error('UNKNOWN_ARCHIVE_FORMAT');
         }
 
-        const { data: rawData, isAss } = extracted;
+        const { data: rawData, isAss, isMicroDvd } = extracted;
 
         const detected = jschardet.detect(rawData);
 
@@ -459,7 +508,9 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
         }
 
         const decoded = iconv.decode(rawData, encoding);
-        return isAss ? assToSrt(decoded) : decoded;
+        if (isAss) return assToSrt(decoded);
+        if (isMicroDvd) return microDvdToSrt(decoded);
+        return decoded;
     };
 
     const queuedTask = new Promise((resolve, reject) => {
