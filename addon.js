@@ -195,7 +195,23 @@ builder.defineSubtitlesHandler(async function(args) {
 
     const episodeParams = (knownSeason && knownEpisode) ? `&season=${encodeURIComponent(knownSeason)}&episode=${encodeURIComponent(knownEpisode)}` : '';
 
-    let subtitles = subs.map(sub => {
+    // Cand cerem un FILM, dar cautarea RegieLive (fallback dupa nume, fara IMDb ID exact)
+    // aduce si rezultate dintr-un serial cu titlu asemanator, subtitrarile de episod
+    // (ex. "1x01", "S01E01") sunt aproape sigur gresite - le excludem din start, indiferent
+    // daca avem sau nu numele fisierului video ca sa le penalizam prin scor.
+    const EPISODE_TAG_PATTERN = /\bs\d{1,2}e\d{1,2}\b|\b\d{1,2}x\d{1,2}\b/i;
+
+    const filteredSubs = args.type === 'movie'
+        ? subs.filter(sub => {
+            const isEpisodeTagged = EPISODE_TAG_PATTERN.test((sub.title || '').toLowerCase());
+            if (isEpisodeTagged) {
+                console.log(`[FILTRU] Exclusă (pare episod de serial, dar cererea e film): "${sub.title}"`);
+            }
+            return !isEpisodeTagged;
+        })
+        : subs;
+
+    let subtitles = filteredSubs.map(sub => {
         const downloadUrl = sub.url.startsWith('http') ? sub.url : `https://subtitrari.regielive.ro${sub.url}`;
         const { score, breakdown } = calculateScore(sub.title, sub.rating);
         const cleanTitle = sub.title || "RegieLive";
