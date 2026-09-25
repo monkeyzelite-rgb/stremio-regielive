@@ -440,6 +440,21 @@ app.get('/admin/clear-cache', (req, res) => {
     res.send(`Cache golit: ${downloadsCleared} subtitrări descărcate + ${searchesCleared} căutări.`);
 });
 
+// Ruta descarca orice URL i se da in query (ca sa poata prelua arhive de pe RegieLive),
+// deci fara whitelist ar putea fi folosita ca proxy catre orice adresa (SSRF) - inclusiv
+// spre resurse interne Render. Acceptam doar domeniul real de pe care vin arhivele.
+const ALLOWED_DOWNLOAD_HOSTS = new Set(['subtitrari.regielive.ro']);
+
+function isAllowedDownloadUrl(urlString) {
+    try {
+        const parsed = new URL(urlString);
+        return (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+               ALLOWED_DOWNLOAD_HOSTS.has(parsed.hostname);
+    } catch {
+        return false;
+    }
+}
+
 app.get(['/download', '/download.vtt'], async (req, res) => {
     const zipUrl = req.query.url;
     const sessionCookie = req.query.cookie || ''; // Citim Cookie-ul din URL
@@ -447,6 +462,11 @@ app.get(['/download', '/download.vtt'], async (req, res) => {
     const knownEpisode = req.query.episode || null;
 
     if (!zipUrl) return res.status(400).send('URL lipsă');
+
+    if (!isAllowedDownloadUrl(zipUrl)) {
+        console.warn(`[SECURITATE] Refuz descărcare de pe domeniu neautorizat: ${zipUrl}`);
+        return res.status(400).send('Domeniu nepermis');
+    }
 
     // Funcție ajutătoare pentru a trimite corect spre iOS și PC
     const sendSubtitleResponse = (text, responseObj) => {
